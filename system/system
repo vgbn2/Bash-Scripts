@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Main entry point. It loads the smaller files in system-lib/.
+
+set -u
+
+SYSTEM_ENTRY="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SYSTEM_DIR="$(cd -- "$(dirname -- "$SYSTEM_ENTRY")" && pwd)"
+TOOL_ROOT="$(cd -- "$SYSTEM_DIR/.." && pwd)"
+LIB_DIR="$SYSTEM_DIR/system-lib"
+
+source "$LIB_DIR/header.sh"
+source "$LIB_DIR/section-shell.sh"
+source "$LIB_DIR/health.sh"
+source "$LIB_DIR/network.sh"
+source "$LIB_DIR/ssh.sh"
+source "$LIB_DIR/hardware.sh"
+source "$LIB_DIR/input.sh"
+source "$LIB_DIR/controllers.sh"
+source "$LIB_DIR/display.sh"
+source "$LIB_DIR/firmware.sh"
+source "$LIB_DIR/cooling.sh"
+source "$LIB_DIR/actions.sh"
+source "$LIB_DIR/monitor.sh"
+source "$LIB_DIR/main.sh"

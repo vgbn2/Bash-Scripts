@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CPU_MIN_GHZ=2.4
+CPU_MAX_GHZ=4.4
+PROFILE_PATH=/sys/firmware/acpi/platform_profile
+PROFILE_CHOICES_PATH=/sys/firmware/acpi/platform_profile_choices
+TURBO_PATH=/sys/devices/system/cpu/intel_pstate/no_turbo
+
+usage() {
+    cat <<'USAGE'
+usage: cpu <command> [value]
+
+commands:
+  status              show profile, CPU cap, current frequency, turbo, temp
+  <GHz>               set CPU max frequency, e.g. cpu 3.3
+  recommend           pick a CPU cap from current temp/load
+  cool                low-power profile + 2.6 GHz + turbo off
+  balanced            balanced profile + recommended CPU cap
+  game                max-power profile + 4.0 GHz + turbo on
+  full                performance profile + 4.4 GHz + turbo on
+  profile <name>      set platform profile: low-power/balanced/performance/max-power/custom
+  turbo on|off        enable or disable turbo
+USAGE
+}
+
+need_sudo_write() {
+    local path=$1 value=$2
+    if [ ! -e "$path" ]; then
+        echo "missing: $path" >&2
+        return 1
+    fi
+    printf '%s\n' "$value" | sudo tee "$path" >/dev/null
+}
+
+cpu_temp_c() {
+    sensors 2>/dev/null | awk '/Package id 0:/ {gsub(/[+°C]/, "", $4); printf "%d", $4; exit}'
+}
+
+load_1m() {
+    awk '{printf "%.1f", $1}' /proc/loadavg
+}
+
+set_cpu() {
+    local input=${1:-}
+    local khz
+
+    khz=$(awk -v v="$input" -v min="$CPU_MIN_GHZ" -v max="$CPU_MAX_GHZ" 'BEGIN {
+        if (v !~ /^[0-9]+([.][0-9]+)?$/) exit 2;
+        if (v > 100) v = v / 1000;
+        if (v <= min || v > max) exit 3;
+        printf "%d", v * 1000000;
+    }') || {
+        echo "cpu: use a value > ${CPU_MIN_GHZ} and <= ${CPU_MAX_GHZ} GHz, example: cpu cpu 3.3" >&2
+        return 2
+    }
+
+    sudo bash -c 'for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo "$1" > "$f"; done' _ "$khz"
+    echo "CPU max frequency set to ${input} GHz"
+}
+
+set_profile() {
+    local profile=${1:-}
+    local choices
+
+    if [ ! -r "$PROFILE_CHOICES_PATH" ]; then
+        echo "platform profile is not available" >&2
+        return 1
+    fi
+
+    choices=$(cat "$PROFILE_CHOICES_PATH")
+    case " $choices " in
+        *" $profile "*) need_sudo_write "$PROFILE_PATH" "$profile" ;;
+        *)
+            echo "invalid profile: $profile" >&2
+            echo "choices: $choices" >&2
+            return 2
+            ;;
+    esac
+}
+
+set_turbo() {
+    case "${1:-}" in
+        on) need_sudo_write "$TURBO_PATH" 0; echo "turbo enabled" ;;
+        off) need_sudo_write "$TURBO_PATH" 1; echo "turbo disabled" ;;
+        *) echo "usage: cpu turbo on|off" >&2; return 2 ;;
+    esac
+}
+
+recommend_cpu() {
+    local temp load target
+    temp=$(cpu_temp_c)
+    load=$(load_1m)
+
+    if [ -z "$temp" ]; then
+        echo "could not read CPU package temp" >&2
+        return 1
+    fi
+
+    if [ "$temp" -ge 85 ]; then
+        target=2.6
+    elif [ "$temp" -ge 78 ]; then
+        target=3.0
+    elif awk -v l="$load" 'BEGIN { exit !(l >= 5.0) }'; then
+        target=3.3
+    elif [ "$temp" -le 65 ]; then
+        target=4.0
+    else
+        target=3.3
+    fi
+
+    echo "temp=${temp}C load=${load} -> cpu ${target}"
+    set_cpu "$target"
+}
+
+status() {
+    local profile turbo temp
+    profile=$(cat "$PROFILE_PATH" 2>/dev/null || true)
+    turbo=$(cat "$TURBO_PATH" 2>/dev/null || true)
+    temp=$(cpu_temp_c)
+
+    printf 'profile=%s\n' "${profile:-unknown}"
+    printf 'turbo=%s\n' "$([ "$turbo" = 0 ] && echo on || echo off)"
+    printf 'temp=%sC\n' "${temp:-unknown}"
+    printf 'load=%s\n' "$(load_1m)"
+    printf 'cpu_max_khz=%s\n' "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null || echo unknown)"
+    printf 'cpu_cur_khz=%s\n' "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo unknown)"
+}
+
+cmd=${1:-}
+case "$cmd" in
+    [0-9]*|.[0-9]*) set_cpu "$cmd" ;;
+    status) status ;;
+    cpu) set_cpu "${2:-}" ;;
+    recommend) recommend_cpu ;;
+    cool)
+        set_profile low-power
+        set_turbo off
+        set_cpu 2.6
+        ;;
+    balanced)
+        set_profile balanced
+        recommend_cpu
+        ;;
+    game)
+        set_profile max-power
+        set_turbo on
+        set_cpu 4.0
+        ;;
+    full)
+        set_profile performance
+        set_turbo on
+        set_cpu 4.4
+        ;;
+    profile) set_profile "${2:-}" ;;
+    turbo) set_turbo "${2:-}" ;;
+    -h|--help|help|"") usage ;;
+    *) echo "unknown command: $cmd" >&2; usage >&2; exit 2 ;;
+esac

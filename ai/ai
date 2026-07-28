@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Main entry point for local-AI checks and explicit model actions.
+
+set -u
+
+AI_ENTRY="$(readlink -f -- "${BASH_SOURCE[0]}")"
+AI_DIR="$(cd -- "$(dirname -- "$AI_ENTRY")" && pwd)"
+LIB_DIR="$AI_DIR/ai-lib"
+
+source "$LIB_DIR/common.sh"
+source "$LIB_DIR/status.sh"
+source "$LIB_DIR/models.sh"
+source "$LIB_DIR/diagnose.sh"
+source "$LIB_DIR/actions.sh"
+source "$LIB_DIR/main.sh"

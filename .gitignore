@@ -1,0 +1,10 @@
+# Local runtime output and temporary files
+*.log
+*.tmp
+*.swp
+.DS_Store
+
+# Keep local machine state out of the repository
+.local/
+state/
+logs/

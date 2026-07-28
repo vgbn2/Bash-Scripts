@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -u
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/system-health"
+LATEST="$STATE_DIR/latest.log"
+
+usage() {
+    cat <<'USAGE'
+usage: system-health [command]
+
+commands:
+  run       write a new full report (default)
+  summary   print a short summary from the latest report
+  latest    print the latest report path
+USAGE
+}
+
+section() {
+    printf '\n## %s\n' "$1"
+}
+
+run() {
+    printf '\n$ %s\n' "$*"
+    "$@" 2>&1 || printf 'exit=%s\n' "$?"
+}
+
+run_sh() {
+    printf '\n$ %s\n' "$*"
+    bash -c "$*" 2>&1 || printf 'exit=%s\n' "$?"
+}
+
+write_report() {
+    local stamp report
+    mkdir -p "$STATE_DIR"
+    stamp=$(date +%Y%m%d-%H%M%S)
+    report="$STATE_DIR/health-$stamp.log"
+
+    {
+        printf '# System Health Report\n'
+        printf 'host=%s\n' "$(hostname)"
+        printf 'date=%s\n' "$(date --iso-8601=seconds)"
+        printf 'kernel=%s\n' "$(uname -r)"
+
+        section "Load And Uptime"
+        run uptime
+
+        section "Thermals"
+        run sensors
+
+        section "CPU Policy"
+        run_sh 'lscpu | grep -E "Model name|CPU max MHz|CPU min MHz"'
+        run_sh 'printf "platform_profile="; cat /sys/firmware/acpi/platform_profile 2>/dev/null || true'
+        run_sh 'printf "platform_profile_choices="; cat /sys/firmware/acpi/platform_profile_choices 2>/dev/null || true'
+        run_sh 'printf "no_turbo="; cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || true'
+        run_sh 'printf "scaling_max_freq="; cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null || true'
+        run_sh 'printf "scaling_cur_freq="; cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || true'
+
+        section "GPU"
+        run nvidia-smi
+        run_sh 'command -v vulkaninfo >/dev/null && vulkaninfo --summary || echo "vulkaninfo not installed"'
+
+        section "Flatpak GPU Runtime"
+        run_sh 'flatpak list --runtime | grep -Ei "nvidia|GL32|Platform.GL" || true'
+        run_sh 'driver=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | tr "." "-"); echo "host_driver=$driver"; flatpak list --runtime | grep -F "nvidia-$driver" || echo "missing matching flatpak nvidia runtime: nvidia-$driver"'
+
+        section "Desktop Services"
+        run_sh 'systemctl is-active gdm.service accounts-daemon.service 2>/dev/null || true'
+        run_sh 'systemctl --no-pager --failed || true'
+
+        section "Disk"
+        run df -h /
+        run_sh 'df -h "$HOME"'
+
+        section "Recent High Priority Journal"
+        run_sh 'journalctl -p warning..alert -b --no-pager -n 80'
+    } >"$report"
+
+    ln -sfn "$report" "$LATEST"
+    printf '%s\n' "$report"
+}
+
+latest_path() {
+    if [ ! -e "$LATEST" ]; then
+        echo "no report yet; run: system-health" >&2
+        return 1
+    fi
+    readlink -f "$LATEST"
+}
+
+summary() {
+    local report section=""
+    report=$(latest_path) || return 1
+
+    awk '
+        /^host=|^date=|^kernel=/ { print; next }
+        /^## / { section=$0; next }
+        section == "## Load And Uptime" && /load average:/ { print; next }
+        section == "## Thermals" && /Package id 0:/ { print; next }
+        section == "## CPU Policy" && /^(platform_profile=|no_turbo=|scaling_max_freq=|scaling_cur_freq=)/ { print; next }
+        section == "## GPU" && /NVIDIA-SMI|Driver Version:|GPU  Name|NVIDIA GeForce|GenshinImpact|anime-game-launcher|[0-9]+C .*W \/|deviceName *=|driverInfo *=/ { print; next }
+        section == "## Flatpak GPU Runtime" && /^(host_driver=|missing matching)|nvidia-[0-9]+-[0-9]+/ { print; next }
+        section == "## Desktop Services" && /^(active|inactive|failed)$|loaded units listed|0 loaded units listed/ { print; next }
+        section == "## Disk" && /^\/dev\// { print; next }
+    ' "$report"
+}
+
+case "${1:-run}" in
+    run) write_report ;;
+    summary) summary ;;
+    latest) latest_path ;;
+    -h|--help|help) usage ;;
+    *) echo "unknown command: $1" >&2; usage >&2; exit 2 ;;
+esac

@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat <<'USAGE'
+usage: system-repair <command>
+
+commands:
+  suggest    inspect common issues and print recommended repair commands
+  thermal    apply balanced thermal policy
+  gpu        refresh Flatpak NVIDIA runtime and stop stale game launchers
+  desktop    restart accounts-daemon and gdm
+
+Notes:
+  - This script is manual. It is not used by the weekly health timer.
+  - Some commands use sudo and may ask for your password.
+  - "desktop" can disrupt the graphical login/session. Use it only when the desktop is already broken.
+USAGE
+}
+
+driver_slug() {
+    nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | tr "." "-"
+}
+
+cpu_temp_c() {
+    sensors 2>/dev/null | awk '/Package id 0:/ {gsub(/[+°C]/, "", $4); printf "%d", $4; exit}'
+}
+
+suggest() {
+    local temp driver failed
+    temp=$(cpu_temp_c || true)
+    driver=$(driver_slug || true)
+
+    echo "## Thermal"
+    if [ -n "${temp:-}" ]; then
+        echo "cpu_temp=${temp}C"
+        if [ "$temp" -ge 85 ]; then
+            echo "recommend: system-repair thermal"
+        elif [ "$temp" -ge 78 ]; then
+            echo "recommend: cpu 3.0"
+        else
+            echo "ok"
+        fi
+    else
+        echo "could not read CPU temp"
+    fi
+
+    echo
+    echo "## GPU"
+    if nvidia-smi >/dev/null 2>&1; then
+        echo "nvidia-smi=ok"
+        if [ -n "${driver:-}" ]; then
+            echo "host_driver=$driver"
+            if flatpak list --runtime 2>/dev/null | grep -Fq "nvidia-$driver"; then
+                echo "flatpak_nvidia_runtime=ok"
+            else
+                echo "flatpak_nvidia_runtime=missing"
+                echo "recommend: system-repair gpu"
+            fi
+        fi
+    else
+        echo "nvidia-smi=failed"
+        echo "recommend: reboot first if games are not running; then diagnose driver"
+    fi
+
+    echo
+    echo "## Desktop"
+    systemctl is-active gdm.service accounts-daemon.service 2>/dev/null || true
+    failed=$(systemctl --failed --no-legend 2>/dev/null | wc -l || true)
+    failed=${failed:-unknown}
+    echo "failed_units=$failed"
+    if ! systemctl is-active --quiet accounts-daemon.service 2>/dev/null; then
+        echo "recommend: system-repair desktop"
+    fi
+}
+
+thermal() {
+    echo "Applying balanced thermal policy..."
+    if command -v cpu >/dev/null 2>&1; then
+        cpu balanced
+    else
+        echo balanced | sudo tee /sys/firmware/acpi/platform_profile >/dev/null
+        sudo bash -c 'for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo 3300000 > "$f"; done'
+    fi
+}
+
+gpu() {
+    local driver
+    driver=$(driver_slug || true)
+    if [ -z "$driver" ]; then
+        echo "Cannot read NVIDIA driver version from nvidia-smi." >&2
+        return 1
+    fi
+
+    echo "Stopping Steam/AAGL Flatpak instances so they relaunch with fresh GPU runtime..."
+    flatpak kill com.valvesoftware.Steam 2>/dev/null || true
+    flatpak kill moe.launcher.an-anime-game-launcher 2>/dev/null || true
+
+    echo "Ensuring matching Flatpak NVIDIA runtime: nvidia-$driver"
+    flatpak install -y flathub "org.freedesktop.Platform.GL.nvidia-$driver" "org.freedesktop.Platform.GL32.nvidia-$driver"
+
+    echo "GPU repair complete. Relaunch Steam/AAGL manually."
+}
+
+desktop() {
+    cat <<'WARN'
+This may disrupt the graphical login/session.
+It will restart accounts-daemon and gdm.
+WARN
+    read -r -p "Continue? Type YES: " answer
+    if [ "$answer" != "YES" ]; then
+        echo "aborted"
+        return 1
+    fi
+
+    sudo systemctl reset-failed accounts-daemon.service gdm.service
+    sudo systemctl restart accounts-daemon.service
+    sudo systemctl restart gdm.service
+    systemctl status accounts-daemon.service gdm.service --no-pager
+}
+
+case "${1:-}" in
+    suggest) suggest ;;
+    thermal) thermal ;;
+    gpu) gpu ;;
+    desktop) desktop ;;
+    -h|--help|help|"") usage ;;
+    *) echo "unknown command: $1" >&2; usage >&2; exit 2 ;;
+esac

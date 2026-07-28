@@ -1,0 +1,375 @@
+#!/usr/bin/env bash
+# General gaming compatibility and graphics tools for this Linux/Flatpak Steam PC.
+# Checks are read-only. Repairs require --yes and never change Proton settings.
+
+set -u
+
+STEAM_ROOT="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+
+show_help() {
+    cat <<'HELP'
+Usage: system games <command>
+Compatibility alias: gaming <command>
+
+CHECKS (read-only)
+  system games status
+      Show NVIDIA, Vulkan, Steam Flatpak, and Flatpak-runtime status.
+
+  system games steam
+      List installed Steam games. Alias: system games games.
+
+  system games non-steam
+      List Steam shortcuts and local non-Steam game launchers.
+
+  system games launchers
+      List detected Steam, Flatpak, and desktop game launchers.
+
+  system games all
+      Show Steam games, non-Steam games, and launchers together.
+
+  system games compatibility
+      Summarize whether each installed game has a Proton prefix.
+
+  system games diagnose
+      Run graphics and llvmpipe diagnostics.
+
+REPAIRS (explicit, changes state)
+  system games repair-flatpak-gpu --yes
+      Stops Steam and refreshes the matching Flatpak NVIDIA runtime.
+
+  system games repair-nvidia-devices --yes
+      Recreates NVIDIA device nodes, then checks nvidia-smi.
+
+HELP
+}
+
+section() {
+    printf '\n=== %s ===\n' "$1"
+}
+
+has_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+show_nvidia_status() {
+    section "NVIDIA driver"
+
+    if nvidia-smi 2>&1; then
+        return
+    fi
+
+    echo
+    echo "NVIDIA is not currently usable."
+    echo "This prevents reliable CUDA and dedicated-GPU game acceleration."
+    echo "Run: system games repair-nvidia-devices --yes"
+}
+
+show_vulkan_status() {
+    local summary
+
+    section "Vulkan renderer"
+
+    if ! has_command vulkaninfo; then
+        echo "vulkaninfo is not installed."
+        return
+    fi
+
+    summary=$(vulkaninfo --summary 2>&1 || true)
+    printf '%s\n' "$summary" | grep -Ei 'GPU id|deviceName|driverName|llvmpipe|software' || true
+
+    if printf '%s\n' "$summary" | grep -qi 'llvmpipe'; then
+        echo "WARNING: llvmpipe detected. Vulkan is using CPU software rendering."
+    elif [ -z "$summary" ]; then
+        echo "Vulkan status could not be read."
+    else
+        echo "No llvmpipe text found in the Vulkan summary."
+    fi
+}
+
+show_flatpak_status() {
+    section "Flatpak Steam and NVIDIA runtimes"
+
+    if ! has_command flatpak; then
+        echo "Flatpak is not installed."
+        return
+    fi
+
+    flatpak list --app | grep -F 'com.valvesoftware.Steam' || \
+        echo "Flatpak Steam is not installed."
+
+    printf '\nInstalled NVIDIA runtimes:\n'
+    flatpak list --runtime | grep -Ei 'org.freedesktop.Platform.GL(32)?\.nvidia' || \
+        echo "No Flatpak NVIDIA runtime is installed."
+
+    printf '\nRunning Flatpak apps:\n'
+    flatpak ps 2>/dev/null || true
+}
+
+show_status() {
+    show_nvidia_status
+    show_vulkan_status
+    show_flatpak_status
+}
+
+show_diagnosis() {
+    show_vulkan_status
+
+    section "Quick diagnosis"
+    if nvidia-smi >/dev/null 2>&1; then
+        echo "NVIDIA host driver: available"
+    else
+        echo "NVIDIA host driver: unavailable"
+        echo "Fix the host driver/device nodes before changing Steam or Proton."
+    fi
+}
+
+steam_library_roots() {
+    local library_file="$STEAM_ROOT/steamapps/libraryfolders.vdf"
+
+    {
+        printf '%s\n' "$STEAM_ROOT"
+        if [ -f "$library_file" ]; then
+            awk -F '"' '/"path"/ && length($4) > 0 {print $4}' "$library_file"
+        fi
+    } | sort -u
+}
+
+list_installed_games() {
+    local library
+    local manifest
+    local app_id
+    local game_name
+    local games
+
+    section "Installed Steam games"
+    if [ ! -d "$STEAM_ROOT" ]; then
+        echo "Flatpak Steam library was not found: $STEAM_ROOT"
+        return 1
+    fi
+
+    games=$(
+        while IFS= read -r library; do
+            [ -d "$library/steamapps" ] || continue
+            for manifest in "$library"/steamapps/appmanifest_*.acf; do
+                [ -f "$manifest" ] || continue
+                app_id=$(awk -F '"' '/"appid"/ {print $4; exit}' "$manifest")
+                game_name=$(awk -F '"' '/"name"/ {print $4; exit}' "$manifest")
+                is_steam_tool "$game_name" && continue
+                printf '%s\t%s\t%s\n' \
+                    "${game_name:-Unknown game}" "${app_id:-unknown}" "$library"
+            done
+        done < <(steam_library_roots) | sort -u
+    )
+
+    if [ -n "$games" ]; then
+        printf '%s\n' "$games"
+    else
+        echo "No Steam game manifests were found."
+    fi
+}
+
+is_steam_tool() {
+    case "${1:-}" in
+        Proton*|Steam\ Linux\ Runtime*|Steamworks\ Common\ Redistributables)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+show_compatibility_summary() {
+    local library
+    local manifest
+    local app_id
+    local game_name
+    local compat_dir
+
+    section "Game compatibility summary"
+    if [ ! -d "$STEAM_ROOT" ]; then
+        echo "Flatpak Steam library was not found: $STEAM_ROOT"
+        return 1
+    fi
+
+    while IFS= read -r library; do
+        [ -d "$library/steamapps" ] || continue
+        compat_dir="$library/steamapps/compatdata"
+
+        for manifest in "$library"/steamapps/appmanifest_*.acf; do
+            [ -f "$manifest" ] || continue
+            app_id=$(awk -F '"' '/"appid"/ {print $4; exit}' "$manifest")
+            game_name=$(awk -F '"' '/"name"/ {print $4; exit}' "$manifest")
+            is_steam_tool "$game_name" && continue
+
+            if [ -d "$compat_dir/$app_id/pfx" ]; then
+                printf '%s: Proton prefix found\n' "${game_name:-Unknown game}"
+            else
+                printf '%s: no Proton prefix (may be native Linux or not launched yet)\n' \
+                    "${game_name:-Unknown game}"
+            fi
+        done
+    done < <(steam_library_roots)
+
+    printf '\nInstalled Proton versions:\n'
+    while IFS= read -r library; do
+        find "$library/steamapps/common" -maxdepth 1 -mindepth 1 \
+            -type d -iname 'Proton*' -printf '%f\n' 2>/dev/null
+    done < <(steam_library_roots) | sort -u
+}
+
+list_steam_shortcuts() {
+    local shortcut_file
+    local found=0
+    local name
+
+    section "Steam non-Steam shortcuts"
+
+    for shortcut_file in "$STEAM_ROOT"/userdata/*/config/shortcuts.vdf; do
+        [ -f "$shortcut_file" ] || continue
+        while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            found=1
+            printf '%s\n' "$name"
+        done < <(
+            strings -a "$shortcut_file" 2>/dev/null |
+                awk 'previous == "appname" {print; previous=""}
+                     $0 == "appname" {previous="appname"}'
+        )
+    done
+
+    if [ "$found" -eq 0 ]; then
+        echo "No Steam non-Steam shortcuts were found."
+    fi
+}
+
+list_local_game_launchers() {
+    local desktop_file
+    local name
+    local exec_line
+    local found=0
+
+    section "Local non-Steam game launchers"
+
+    for desktop_file in "$HOME"/.local/share/applications/*.desktop; do
+        [ -f "$desktop_file" ] || continue
+        grep -Eqi '^Categories=.*Game' "$desktop_file" || continue
+        name=$(awk -F '=' '/^Name=/ {print substr($0, 6); exit}' "$desktop_file")
+        exec_line=$(awk -F '=' '/^Exec=/ {print substr($0, 6); exit}' "$desktop_file")
+
+        case "$exec_line" in
+            *steam://rungameid/*|*'/steam '*|*'/steam %'*)
+                continue
+                ;;
+        esac
+        [ "$name" = "Steam" ] && continue
+
+        found=1
+        printf '%s\n' "${name:-$(basename -- "$desktop_file" .desktop)}"
+    done
+
+    if [ "$found" -eq 0 ]; then
+        echo "No local non-Steam game launchers were found."
+    fi
+}
+
+list_non_steam_games() {
+    list_steam_shortcuts
+    list_local_game_launchers
+}
+
+list_game_launchers() {
+    local output
+    local desktop_file
+    local name
+
+    section "Installed game platforms and launchers"
+
+    if has_command flatpak; then
+        output=$(flatpak list --app --columns=name,application 2>/dev/null |
+            grep -Ei 'steam|game|launcher|minecraft|lutris|heroic|bottles|itch' ||
+            true)
+        [ -n "$output" ] && printf '%s\n' "$output"
+    fi
+
+    for desktop_file in "$HOME"/.local/share/applications/*.desktop; do
+        [ -f "$desktop_file" ] || continue
+        grep -Eqi '^Categories=.*Game' "$desktop_file" || continue
+        name=$(awk -F '=' '/^Name=/ {print substr($0, 6); exit}' "$desktop_file")
+        case "$name" in
+            Steam|*Launcher*|*Minecraft*|Lutris|Heroic*|Bottles)
+                printf '%s\tlocal desktop launcher\n' "$name"
+                ;;
+        esac
+    done | sort -u
+}
+
+list_all_games() {
+    list_installed_games
+    list_non_steam_games
+    list_game_launchers
+}
+
+repair_flatpak_gpu() {
+    if [ "${1:-}" != "--yes" ]; then
+        echo "This stops Steam and changes Flatpak runtimes." >&2
+        echo "Run: system games repair-flatpak-gpu --yes" >&2
+        return 2
+    fi
+
+    system-repair gpu
+}
+
+repair_nvidia_devices() {
+    if [ "${1:-}" != "--yes" ]; then
+        echo "This recreates NVIDIA device nodes." >&2
+        echo "Run: system games repair-nvidia-devices --yes" >&2
+        return 2
+    fi
+
+    sudo /sbin/ub-device-create
+    nvidia-smi
+}
+
+command_name=${1:-help}
+
+case "$command_name" in
+    help|-h|--help)
+        show_help
+        ;;
+    status)
+        show_status
+        ;;
+    games)
+        list_installed_games
+        ;;
+    steam)
+        list_installed_games
+        ;;
+    non-steam)
+        list_non_steam_games
+        ;;
+    launchers)
+        list_game_launchers
+        ;;
+    all)
+        list_all_games
+        ;;
+    compatibility)
+        show_compatibility_summary
+        ;;
+    diagnose)
+        show_diagnosis
+        ;;
+    repair-flatpak-gpu)
+        repair_flatpak_gpu "${2:-}"
+        ;;
+    repair-nvidia-devices)
+        repair_nvidia_devices "${2:-}"
+        ;;
+    *)
+        echo "Unknown gaming command: $command_name" >&2
+        show_help >&2
+        exit 2
+        ;;
+esac
