@@ -125,7 +125,11 @@ case "$area" in
         [ "$action" = "hardware" ] && show_memory_hardware || show_help
         ;;
     ssd)
-        [ "$action" = "health" ] && show_ssd_health || show_help
+        case "$action" in
+            health) show_ssd_health ;;
+            raw) show_nvme_raw "${3:-}" ;;
+            *) show_help ;;
+        esac
         ;;
     storage)
         case "$action" in

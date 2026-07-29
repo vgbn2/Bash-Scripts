@@ -22,7 +22,8 @@ WORKLOADS
 HARDWARE
   system cpu [status|cool|balanced|game|full|<GHz>]
   system ram status | battery status | gpu status | thermals status
-  system ssd health | storage [sections|home] | memory hardware
+  system ssd health | ssd raw /dev/nvmeNnM
+  system storage [sections|home] | memory hardware
   system input [help|status|settings|mouse-speed [<-1.0..1.0>]]
   system input [backlight [level]|rgb status|install-tools --yes]
   system input rgb set <device> <pattern> <RRGGBB> --yes

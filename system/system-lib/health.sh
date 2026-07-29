@@ -96,26 +96,75 @@ show_nvme_summary() {
         return
     fi
 
+    printf 'Critical warning: %s\n' "$(nvme_value "$smart_output" critical_warning)"
     printf 'Temperature: %s\n' "$(nvme_value "$smart_output" temperature)"
-    printf 'Wear used: %s\n' "$(nvme_value "$smart_output" percentage_used)"
+    printf 'Available spare: %s\n' "$(nvme_value_first "$smart_output" available_spare avail_spare)"
+    printf 'Spare threshold: %s\n' "$(nvme_value_first "$smart_output" available_spare_threshold spare_threshold spare_thresh)"
+    printf 'Wear used: %s\n' "$(nvme_value_first "$smart_output" percentage_used percent_used)"
     printf 'Power-on hours: %s\n' "$(nvme_value "$smart_output" power_on_hours)"
+    printf 'Power cycles: %s\n' "$(nvme_value "$smart_output" power_cycles)"
+    printf 'Unsafe shutdowns: %s\n' "$(nvme_value "$smart_output" unsafe_shutdowns)"
     printf 'Media errors: %s\n' "$(nvme_value "$smart_output" media_errors)"
+    printf 'Error log entries: %s\n' "$(nvme_value "$smart_output" num_err_log_entries)"
 
     data_read_units=$(nvme_value "$smart_output" data_units_read)
     data_written_units=$(nvme_value "$smart_output" data_units_written)
     printf 'Data read: %s\n' "$(nvme_data_units_to_tb "$data_read_units")"
     printf 'Data written: %s\n' "$(nvme_data_units_to_tb "$data_written_units")"
+    printf 'Host read commands: %s\n' "$(nvme_value "$smart_output" host_read_commands)"
+    printf 'Host write commands: %s\n' "$(nvme_value "$smart_output" host_write_commands)"
+    printf 'Controller busy time: %s\n' "$(nvme_value "$smart_output" controller_busy_time)"
+    printf 'Warning temperature time: %s\n' \
+        "$(nvme_value_first "$smart_output" warning_temp_time warning_temperature_time)"
+    printf 'Critical temperature time: %s\n' \
+        "$(nvme_value_first "$smart_output" critical_comp_time critical_temperature_time critical_composite_temperature_time)"
+    printf 'Temperature sensors: %s | %s | %s\n' \
+        "$(nvme_value "$smart_output" temperature_sensor_1)" \
+        "$(nvme_value "$smart_output" temperature_sensor_2)" \
+        "$(nvme_value "$smart_output" temperature_sensor_3)"
+}
+
+show_nvme_raw() {
+    local device=${1:-}
+
+    if ! [[ "$device" =~ ^/dev/nvme[0-9]+n[0-9]+$ ]]; then
+        echo "Usage: system ssd raw /dev/nvmeNnM" >&2
+        return 2
+    fi
+
+    print_section "Raw NVMe SMART log: $device"
+    sudo nvme smart-log "$device"
 }
 
 nvme_value() {
     local output=$1 field=$2
-    awk -F: -v field="$field" '$1 ~ "^[[:space:]]*" field "[[:space:]]*$" {
-        value=$2
-        sub(/^[[:space:]]+/, "", value)
-        sub(/[[:space:]]+$/, "", value)
-        print value
-        exit
-    }' <<<"$output"
+    awk -F: -v wanted="$field" '
+        function normalize(value) {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            gsub(/[^[:alnum:]]+/, "_", value)
+            gsub(/^_+|_+$/, "", value)
+            return tolower(value)
+        }
+        normalize($1) == wanted {
+            value=$2
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            print value
+            exit
+        }' <<<"$output"
+}
+
+nvme_value_first() {
+    local output=$1 field value
+    shift
+    for field in "$@"; do
+        value=$(nvme_value "$output" "$field")
+        if [ -n "$value" ]; then
+            printf '%s\n' "$value"
+            return
+        fi
+    done
+    echo "unavailable"
 }
 
 nvme_data_units_to_tb() {

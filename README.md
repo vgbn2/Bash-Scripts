@@ -144,6 +144,15 @@ system firmware refresh --yes
 system firmware update --yes
 ```
 
+NVMe storage reports include health, temperature, spare capacity, wear,
+power cycles, unsafe shutdowns, error counters, host commands, and data
+read/write totals:
+
+```bash
+system ssd health
+system ssd raw /dev/nvme1n1
+```
+
 USB keyboard RGB is available only when OpenRGB recognizes the device:
 
 ```bash
