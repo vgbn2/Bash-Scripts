@@ -1,10 +1,42 @@
-# Local runtime output and temporary files
+# Runtime output
 *.log
+*.log.*
+*.out
+*.pid
+*.lock
 *.tmp
-*.swp
-.DS_Store
-
-# Keep local machine state out of the repository
-.local/
-state/
+tmp/
 logs/
+state/
+reports/
+.cache/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local.sh
+.direnv/
+
+# Test and coverage artifacts
+coverage/
+test-results/
+
+# Editors and operating systems
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Tool-local runtime state
+.local/
+.nfs*
+
+# Local agent and session continuity
+.agent/
+.agents/
+.codex/
+workspace/

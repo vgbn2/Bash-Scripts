@@ -317,7 +317,7 @@ repair_flatpak_gpu() {
         return 2
     fi
 
-    system-repair gpu
+    system-repair gpu --yes
 }
 
 repair_nvidia_devices() {

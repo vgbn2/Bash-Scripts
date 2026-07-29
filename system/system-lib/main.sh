@@ -44,7 +44,7 @@ run_repair() {
     if [ -z "$action" ]; then
         delegate_tool "maintenance/system-repair" help
     else
-        delegate_tool "maintenance/system-repair" "$action"
+        delegate_tool "maintenance/system-repair" "$action" "${3:-}"
     fi
 }
 
@@ -55,6 +55,46 @@ run_desktop() {
             ;;
         *)
             echo "Usage: system desktop terminals" >&2
+            return 2
+            ;;
+    esac
+}
+
+run_archive() {
+    case "$action" in
+        ""|preview)
+            delegate_tool "maintenance/archive_screenshots.sh" preview
+            ;;
+        help|-h|--help)
+            delegate_tool "maintenance/archive_screenshots.sh" help
+            ;;
+        archive|cleanup|all)
+            delegate_tool "maintenance/archive_screenshots.sh" \
+                "$action" "${3:-}"
+            ;;
+        *)
+            echo "Usage: system archive [preview|archive --yes|cleanup --yes|all --yes]" >&2
+            return 2
+            ;;
+    esac
+}
+
+run_setup() {
+    case "$action" in
+        ""|help|-h|--help)
+            delegate_tool "tools/install-system.sh" help
+            ;;
+        status|check|doctor)
+            delegate_tool "tools/install-system.sh" status
+            ;;
+        links)
+            delegate_tool "tools/install-system.sh" links "${3:-}"
+            ;;
+        core|all)
+            delegate_tool "tools/install-system.sh" packages "$action" "${3:-}"
+            ;;
+        *)
+            echo "Usage: system setup [status|links --yes|core --yes|all --yes]" >&2
             return 2
             ;;
     esac
@@ -79,6 +119,12 @@ case "$area" in
     monitor)
         run_monitor "${2:-all}" "${3:-2}"
         ;;
+    doctor)
+        delegate_tool "tools/install-system.sh" status
+        ;;
+    setup)
+        run_setup
+        ;;
     cpu)
         run_cpu
         ;;
@@ -87,6 +133,9 @@ case "$area" in
         ;;
     repair)
         run_repair
+        ;;
+    archive)
+        run_archive
         ;;
     ai)
         if [ -z "$action" ]; then
@@ -116,10 +165,25 @@ case "$area" in
         [ "$action" = "status" ] && show_battery_status || show_help
         ;;
     gpu)
-        [ "$action" = "status" ] && show_gpu_status || show_help
+        case "$action" in
+            status) show_gpu_status ;;
+            health) delegate_tool "hardware/check_gpu.sh" ;;
+            *) show_help ;;
+        esac
         ;;
     thermals)
-        [ "$action" = "status" ] && show_thermals || show_help
+        case "$action" in
+            status) show_thermals ;;
+            once)
+                delegate_tool "hardware/thermal_alert.sh" --once \
+                    --threshold "${3:-73}"
+                ;;
+            watch)
+                delegate_tool "hardware/thermal_alert.sh" \
+                    --threshold "${3:-73}" --interval "${4:-10}"
+                ;;
+            *) show_help ;;
+        esac
         ;;
     memory)
         [ "$action" = "hardware" ] && show_memory_hardware || show_help

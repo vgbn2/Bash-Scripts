@@ -1,38 +1,131 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Cron-friendly NVIDIA and Vulkan health check with truthful exit status.
 
-# Ensure GUI notifications work when triggered by cron
-export DISPLAY=:0
-export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
+set -u
 
-LOG_FILE="$HOME/.gpu_health.log"
-DATE=$(date '+%Y-%m-%d %H:%M:%S')
+export DISPLAY="${DISPLAY:-:0}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
 
-echo "=== GPU Health Check: $DATE ===" >> "$LOG_FILE"
+LOG_FILE="${GPU_HEALTH_LOG:-$HOME/.local/state/system-toolkit/gpu-health.log}"
+status=0
 
-# Test 1: NVIDIA Module Loaded
-if ! lsmod | grep -q "^nvidia "; then
-    echo "CRITICAL: NVIDIA kernel module is NOT loaded!" >> "$LOG_FILE"
-    notify-send -u critical "GPU Warning" "NVIDIA kernel module is NOT loaded!" 2>/dev/null || true
-    exit 1
-fi
+usage() {
+    cat <<'HELP'
+Usage: check_gpu.sh
 
-# Test 2: Check for Open Driver Variant
-if dpkg -l 2>/dev/null | grep -q "nvidia-driver-.*-open"; then
-    echo "WARNING: Open-source NVIDIA driver detected (nvidia-driver-open)." >> "$LOG_FILE"
-    notify-send -u normal "GPU Notice" "Open-source NVIDIA driver detected. Recommend switching to proprietary." 2>/dev/null || true
-fi
+Checks the NVIDIA module, nvidia-smi telemetry, and Vulkan renderer. Results
+are appended to GPU_HEALTH_LOG (default:
+~/.local/state/system-toolkit/gpu-health.log).
 
-# Test 3: Check Vulkan Renderer for LLVMpipe Software Fallback
-VULKAN_DEV=$(vulkaninfo --summary 2>/dev/null | grep "deviceName" | head -n 1)
+Exit status:
+  0  healthy
+  1  critical GPU or software-rendering failure
+  2  incomplete check because an optional diagnostic is unavailable
+HELP
+}
 
-if echo "$VULKAN_DEV" | grep -qi "llvmpipe"; then
-    echo "CRITICAL: System is using CPU software rendering (llvmpipe)!" >> "$LOG_FILE"
-    notify-send -u critical "GPU Critical" "Vulkan is running on CPU software rendering (llvmpipe)!" 2>/dev/null || true
-    exit 1
-else
-    echo "SUCCESS: Vulkan renderer active -> $VULKAN_DEV" >> "$LOG_FILE"
-fi
+log() {
+    printf '%s\n' "$*" | tee -a "$LOG_FILE"
+}
 
-# Test 4: Query GPU Telemetry
-nvidia-smi --query-gpu=driver_version,name,temperature.gpu,fan.speed --format=csv,noheader >> "$LOG_FILE" 2>&1
-echo "Status: OK" >> "$LOG_FILE"
+notify() {
+    local urgency=$1 title=$2 message=$3
+
+    command -v notify-send >/dev/null 2>&1 || return
+    notify-send -u "$urgency" "$title" "$message" 2>/dev/null || true
+}
+
+mark_warning() {
+    [ "$status" -eq 0 ] && status=2
+}
+
+mark_critical() {
+    status=1
+}
+
+check_module() {
+    if ! command -v lsmod >/dev/null 2>&1; then
+        log "WARNING: lsmod is unavailable; kernel-module check skipped."
+        mark_warning
+    elif ! lsmod | grep -q '^nvidia '; then
+        log "CRITICAL: NVIDIA kernel module is not loaded."
+        notify critical "GPU warning" "NVIDIA kernel module is not loaded."
+        mark_critical
+    else
+        log "NVIDIA kernel module: loaded"
+    fi
+
+    if command -v dpkg-query >/dev/null 2>&1 &&
+        dpkg-query -W -f='${binary:Package}\n' 'nvidia-driver-*-open' \
+            2>/dev/null | grep -q '^nvidia-driver-.*-open'; then
+        log "NVIDIA kernel-module flavor: open"
+    fi
+}
+
+check_nvidia_telemetry() {
+    local telemetry
+
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        log "CRITICAL: nvidia-smi is unavailable."
+        notify critical "GPU warning" "nvidia-smi is unavailable."
+        mark_critical
+        return
+    fi
+
+    if telemetry=$(nvidia-smi \
+        --query-gpu=driver_version,name,temperature.gpu,fan.speed \
+        --format=csv,noheader 2>&1); then
+        log "NVIDIA telemetry: $telemetry"
+    else
+        log "CRITICAL: nvidia-smi failed: $telemetry"
+        notify critical "GPU warning" "NVIDIA telemetry query failed."
+        mark_critical
+    fi
+}
+
+check_vulkan() {
+    local summary renderer
+
+    if ! command -v vulkaninfo >/dev/null 2>&1; then
+        log "WARNING: vulkaninfo is unavailable; Vulkan check skipped."
+        mark_warning
+        return
+    fi
+
+    if ! summary=$(vulkaninfo --summary 2>&1); then
+        log "WARNING: vulkaninfo failed: $summary"
+        mark_warning
+        return
+    fi
+    renderer=$(printf '%s\n' "$summary" |
+        awk -F '=' '/deviceName/ {sub(/^[[:space:]]+/, "", $2); print $2; exit}')
+    if printf '%s\n' "$summary" | grep -qi 'llvmpipe'; then
+        log "CRITICAL: Vulkan reports llvmpipe CPU software rendering."
+        notify critical "GPU critical" "Vulkan reports llvmpipe software rendering."
+        mark_critical
+    elif [ -z "$renderer" ]; then
+        log "WARNING: Vulkan renderer was not present in the summary."
+        mark_warning
+    else
+        log "Vulkan renderer: $renderer"
+    fi
+}
+
+case "${1:-}" in
+    help|-h|--help) usage; exit 0 ;;
+    "") ;;
+    *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+
+mkdir -p -- "$(dirname -- "$LOG_FILE")"
+log "=== GPU health check: $(date --iso-8601=seconds) ==="
+check_module
+check_nvidia_telemetry
+check_vulkan
+
+case "$status" in
+    0) log "Status: OK" ;;
+    1) log "Status: CRITICAL" ;;
+    2) log "Status: INCOMPLETE" ;;
+esac
+exit "$status"

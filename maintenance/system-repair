@@ -7,15 +7,26 @@ usage: system-repair <command>
 
 commands:
   suggest    inspect common issues and print recommended repair commands
-  thermal    apply balanced thermal policy
-  gpu        refresh Flatpak NVIDIA runtime and stop stale game launchers
-  desktop    restart accounts-daemon and gdm
+  thermal --yes    apply balanced thermal policy
+  gpu --yes        refresh Flatpak NVIDIA runtime and stop stale game launchers
+  desktop --yes    restart accounts-daemon and gdm
 
 Notes:
   - This script is manual. It is not used by the weekly health timer.
+  - Every state-changing command requires --yes.
   - Some commands use sudo and may ask for your password.
   - "desktop" can disrupt the graphical login/session. Use it only when the desktop is already broken.
 USAGE
+}
+
+require_confirmation() {
+    local action=$1 confirmation=${2:-}
+
+    if [ "$confirmation" != "--yes" ]; then
+        echo "The '$action' repair changes system or runtime state." >&2
+        echo "Run: system-repair $action --yes" >&2
+        return 2
+    fi
 }
 
 driver_slug() {
@@ -35,7 +46,7 @@ suggest() {
     if [ -n "${temp:-}" ]; then
         echo "cpu_temp=${temp}C"
         if [ "$temp" -ge 85 ]; then
-            echo "recommend: system-repair thermal"
+            echo "recommend: system-repair thermal --yes"
         elif [ "$temp" -ge 78 ]; then
             echo "recommend: cpu 3.0"
         else
@@ -55,7 +66,7 @@ suggest() {
                 echo "flatpak_nvidia_runtime=ok"
             else
                 echo "flatpak_nvidia_runtime=missing"
-                echo "recommend: system-repair gpu"
+                echo "recommend: system-repair gpu --yes"
             fi
         fi
     else
@@ -70,7 +81,7 @@ suggest() {
     failed=${failed:-unknown}
     echo "failed_units=$failed"
     if ! systemctl is-active --quiet accounts-daemon.service 2>/dev/null; then
-        echo "recommend: system-repair desktop"
+        echo "recommend: system-repair desktop --yes"
     fi
 }
 
@@ -86,6 +97,11 @@ thermal() {
 
 gpu() {
     local driver
+
+    if ! command -v flatpak >/dev/null 2>&1; then
+        echo "Flatpak is not installed." >&2
+        return 127
+    fi
     driver=$(driver_slug || true)
     if [ -z "$driver" ]; then
         echo "Cannot read NVIDIA driver version from nvidia-smi." >&2
@@ -107,11 +123,6 @@ desktop() {
 This may disrupt the graphical login/session.
 It will restart accounts-daemon and gdm.
 WARN
-    read -r -p "Continue? Type YES: " answer
-    if [ "$answer" != "YES" ]; then
-        echo "aborted"
-        return 1
-    fi
 
     sudo systemctl reset-failed accounts-daemon.service gdm.service
     sudo systemctl restart accounts-daemon.service
@@ -121,9 +132,18 @@ WARN
 
 case "${1:-}" in
     suggest) suggest ;;
-    thermal) thermal ;;
-    gpu) gpu ;;
-    desktop) desktop ;;
+    thermal)
+        require_confirmation thermal "${2:-}"
+        thermal
+        ;;
+    gpu)
+        require_confirmation gpu "${2:-}"
+        gpu
+        ;;
+    desktop)
+        require_confirmation desktop "${2:-}"
+        desktop
+        ;;
     -h|--help|help|"") usage ;;
     *) echo "unknown command: $1" >&2; usage >&2; exit 2 ;;
 esac

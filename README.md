@@ -1,8 +1,43 @@
-# Personal Linux system tools
+# Linux System Operations Toolkit
 
-This folder is the editable source for the custom tools on this laptop.
+An operator-focused Bash toolkit for Linux diagnostics, guarded maintenance,
+hardware controls, local-AI inspection, gaming compatibility, and workstation
+synchronization.
 
-## Layout
+This repository is the canonical source. Runtime state, logs, model data, game
+data, backups, and machine-specific secrets remain outside the checkout.
+
+## Quick start
+
+Clone over HTTPS without configuring a GitHub account or SSH key:
+
+```bash
+git clone https://github.com/vgbn2/Bash-Scripts.git
+cd Bash-Scripts
+tests/smoke.sh
+tools/install-system.sh status
+tools/install-system.sh links --yes
+system help
+```
+
+`status` is read-only. The link action requires `--yes`, creates command links
+under `~/.local/bin`, and does not install packages or enable services. If
+`~/.local/bin` is not already in `PATH`, follow the command's printed guidance
+and open a new shell.
+
+## Operating principles
+
+- Read-only inspection is the default wherever practical.
+- State-changing commands use explicit verbs and validated arguments.
+- High-impact maintenance, package installation, firmware operations, and
+  repairs require `--yes`.
+- Diagnostic commands report missing telemetry as incomplete, never healthy.
+- Source tests use temporary files and mocked host commands; they do not
+  qualify live hardware or services.
+- Debian/Ubuntu with APT is the supported native-package platform. Hardware
+  controls remain dependent on kernel and device support.
+
+## Repository structure
 
 - `system/` - the `system` command and its feature modules
 - `hardware/` - CPU, GPU, and thermal helpers
@@ -12,10 +47,10 @@ This folder is the editable source for the custom tools on this laptop.
 - `ai/` - local-model launch and resource-check helpers
 - `network/` - connectivity and bandwidth-control helpers
 - `backup/` - backup and restore helpers
-- `archive/` - old local script snapshots
+- `archive/` - historical snapshots retained for reference, not active routing
 - `tools/` - maintenance helpers, including the home mirror command
 
-## Commands
+## Command center
 
 Use `system` as the command center:
 
@@ -24,10 +59,13 @@ system
 system menu
 system status
 system monitor
+system doctor
 system ai help
 system games all
 system network processes
 system ssh status
+system gpu health
+system thermals once 80
 ```
 
 Typing a section without a subcommand opens an interactive scoped prompt:
@@ -73,8 +111,8 @@ system games launchers
 system games all
 ```
 
-The older short commands remain available through small symlinks in
-`~/.local/bin` for compatibility:
+Compatibility entry points remain available through small symlinks in
+`~/.local/bin`:
 
 ```bash
 system help
@@ -84,6 +122,90 @@ system-repair suggest
 gaming help
 ai help
 ```
+
+State-changing repairs are guarded at the canonical command, including when
+called outside `system`:
+
+```bash
+system repair thermal --yes
+system repair gpu --yes
+system repair desktop --yes
+```
+
+## Installation and environment audit
+
+No setup action runs automatically. Start with the read-only audit:
+
+```bash
+tools/install-system.sh status
+# After the `system` link exists, this is equivalent:
+system doctor
+system setup status
+```
+
+Create the user command links explicitly:
+
+```bash
+tools/install-system.sh links --yes
+```
+
+The installer links `system`, `cpu`, `system-health`, `system-repair`,
+`gaming`, and `ai` into `~/.local/bin`. It refuses to overwrite an existing
+regular file. Set `SYSTEM_INSTALL_BIN_DIR` to use a different destination.
+
+Install the native Debian/Ubuntu baseline only when requested:
+
+```bash
+tools/install-system.sh packages core --yes
+# Equivalent after linking:
+system setup core --yes
+```
+
+The core group covers the commands used by general status, storage, network,
+health, SSH, and synchronization features. The broader optional group adds
+the feature-specific display, controller, firmware, network-monitoring, and
+GPU-diagnostic packages. Use `system setup status` to see every package and
+the feature associated with a missing command:
+
+```bash
+system setup all --yes
+```
+
+Both package actions use `sudo apt-get`; neither enables services nor changes
+firmware, CPU policy, display settings, or network shaping. OpenRGB is
+deliberately excluded from the broad group because device support and safe
+operation must be checked separately. Use `system input install-rgb --yes`
+only after that review.
+
+## Guarded maintenance and diagnostics
+
+GPU health and thermal checks now return explicit results instead of treating
+missing telemetry as healthy:
+
+```bash
+system gpu health
+system thermals once 80
+system thermals watch 80 10
+```
+
+The thermal watcher checks both CPU and NVIDIA telemetry, reports the hotter
+reading, and rate-limits repeated notifications. It never changes a hardware
+profile or fan setting.
+
+Archival is preview-only unless an action includes `--yes`:
+
+```bash
+HDD_BASE=/media/user/archive system archive preview
+HDD_BASE=/media/user/archive system archive archive --yes
+system archive cleanup --yes
+```
+
+The archive path must resolve to a mounted filesystem other than `/`. Relative
+subdirectories are preserved and existing destination files are never
+overwritten. Archive sources and targets must not overlap; an absent source is
+reported and skipped while other configured sources continue. Cleanup is
+separate because it removes unused Flatpak runtimes, vacuumed journal history,
+and cached APT packages.
 
 Local-AI checks are read-only by default:
 
@@ -112,8 +234,8 @@ Install optional network diagnostics explicitly:
 system network install-tools --yes
 ```
 
-This installs `nethogs`, `iftop`, `dnsutils`, `iperf3`, and `ethtool` using
-sudo. SSH checks never enable or start the SSH server.
+This installs `nethogs`, `iftop`, `bind9-dnsutils`, `iperf3`, and `ethtool`
+using sudo. SSH checks never enable or start the SSH server.
 
 ## Input, displays, controllers, and firmware
 
@@ -182,7 +304,7 @@ Cooling uses firmware profiles. Manual fan RPM/PWM control is shown only if the
 kernel exposes `fan*_input` or `pwm*` interfaces; this Lenovo currently exposes
 profiles instead of direct fan controls.
 
-## Mirror to home
+## Source mirror
 
 Preview the mirror update:
 
@@ -193,11 +315,41 @@ tools/sync-to-home.sh
 Apply the mirror update:
 
 ```bash
-tools/sync-to-home.sh --apply
+tools/sync-to-home.sh --apply --yes
 ```
 
 The default mirror destination is `$HOME/bash`; override it with
-`BASH_MIRROR_DIR` when needed.
+`BASH_MIRROR_DIR` when needed. Because apply mode uses `rsync --delete`, it
+rejects `/`, the home directory, the source directory, and overlapping
+source/destination paths. Repository and agent metadata (`.git`, `.agents`,
+and `.codex`) are excluded and protected from deletion.
+
+## Verification
+
+Run the non-live regression suite:
+
+```bash
+tests/smoke.sh
+```
+
+It checks Bash syntax, help routing, temporary command-link installation,
+confirmation gates, collision-safe archival, truthful GPU failure reporting,
+and CPU/GPU thermal selection using mocked commands. It does not invoke sudo,
+install packages, clean caches, move real files, or change hardware settings.
+
+Conventional command exit statuses are used:
+
+- `0`: requested check or action completed successfully
+- `1`: operational failure, detected critical condition, or exceeded thermal
+  threshold where documented
+- `2`: invalid usage, missing confirmation, or an incomplete diagnostic where
+  documented
+- `127`: required command is unavailable
+
+Individual command help remains authoritative for specialized statuses. A
+source-level pass is not evidence that sudo access, hardware telemetry,
+firmware delivery, graphical sessions, remote SSH, or scheduled execution
+works on a particular host.
 
 ## Scheduled host-to-child sync
 

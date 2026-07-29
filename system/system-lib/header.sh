@@ -9,8 +9,11 @@ COMMAND CENTER
   system menu                    Enter the interactive command center.
   system status                  Hardware, storage, battery, GPU, and network.
   system monitor [section] [seconds]  Live foreground hardware monitor.
+  system doctor                  Audit runtime tools, packages, and links.
+  system setup [status|links --yes|core --yes|all --yes]
   system health [summary|run|latest]
-  system repair [suggest|thermal|gpu|desktop]
+  system repair suggest
+  system repair [thermal|gpu|desktop] --yes
 
 WORKLOADS
   system ai                      Enter the interactive AI section.
@@ -21,7 +24,8 @@ WORKLOADS
 
 HARDWARE
   system cpu [status|cool|balanced|game|full|<GHz>]
-  system ram status | battery status | gpu status | thermals status
+  system ram status | battery status | gpu status | gpu health
+  system thermals status | thermals once [C] | thermals watch [C] [seconds]
   system ssd health | ssd raw /dev/nvmeNnM
   system storage [sections|home] | memory hardware
   system input [help|status|settings|mouse-speed [<-1.0..1.0>]]
@@ -48,6 +52,7 @@ NETWORK AND SSH
 
 MAINTENANCE AND DESKTOP
   system errors [summary|oom|gpu|storage|network|full]
+  system archive [preview|archive --yes|cleanup --yes|all --yes]
   system desktop terminals        Open the project-terminal workspace.
 
 Existing commands (ai, gaming, cpu, system-health, system-repair) remain
@@ -64,6 +69,8 @@ show_command_center() {
   system status                  Overall hardware and network status
   system health summary          Latest saved health-report summary
   system repair suggest          Safe repair recommendations
+  system doctor                  Missing native tools and command links
+  system setup help              Explicit setup and install commands
 
   system ai help                 Local-model tools
   system games                   Steam, non-Steam, launchers, and compatibility

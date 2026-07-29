@@ -51,7 +51,7 @@ set_cpu() {
         if (v <= min || v > max) exit 3;
         printf "%d", v * 1000000;
     }') || {
-        echo "cpu: use a value > ${CPU_MIN_GHZ} and <= ${CPU_MAX_GHZ} GHz, example: cpu cpu 3.3" >&2
+        echo "cpu: use a value > ${CPU_MIN_GHZ} and <= ${CPU_MAX_GHZ} GHz, example: cpu 3.3" >&2
         return 2
     }
 

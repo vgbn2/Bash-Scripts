@@ -93,8 +93,8 @@ install_network_tools() {
     fi
 
     sudo apt update &&
-        sudo apt install -y nethogs iftop dnsutils iperf3 ethtool &&
-        echo "Installed network tools: nethogs, iftop, dnsutils, iperf3, ethtool"
+        sudo apt install -y nethogs iftop bind9-dnsutils iperf3 ethtool &&
+        echo "Installed network tools: nethogs, iftop, bind9-dnsutils, iperf3, ethtool"
 }
 
 test_internet() {
