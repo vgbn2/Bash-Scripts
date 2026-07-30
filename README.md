@@ -2,7 +2,8 @@
 
 An operator-focused Bash toolkit for Linux diagnostics, guarded maintenance,
 hardware controls, local-AI inspection, gaming compatibility, and workstation
-synchronization.
+synchronization,build for direct control over your hardware ;), i initialy created a sub-script of this to automate processes 
+such as cpu frequency, power, startup apps etc etc.. but decided it would be fun to expand on it for more control , such as networking,launchers, games, ssd health.
 
 This repository is the canonical source. Runtime state, logs, model data, game
 data, backups, and machine-specific secrets remain outside the checkout.
