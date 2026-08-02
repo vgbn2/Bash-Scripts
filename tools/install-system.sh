@@ -66,6 +66,7 @@ Usage: install-system.sh <command> [arguments]
 
 Commands:
   status                  Audit commands, native packages, sudo, and links.
+  install --yes           Create user command links and install core packages.
   links --yes             Create user command links in ~/.local/bin.
   packages core --yes     Install the native baseline with apt-get and sudo.
   packages all --yes      Install the baseline and optional feature tools.
@@ -74,9 +75,11 @@ Commands:
 Environment:
   SYSTEM_INSTALL_BIN_DIR  Override the user command-link directory.
 
-The installer supports Debian/Ubuntu APT hosts. It does not enable services,
-change firmware, apply network shaping, or install OpenRGB. Existing regular
-files in the command-link directory are never overwritten.
+The installer supports Debian/Ubuntu APT hosts. `install --yes` is the
+recommended first-time setup command; it creates user command links before
+requesting sudo for core packages. It does not enable services, change
+firmware, apply network shaping, or install OpenRGB. Existing regular files
+in the command-link directory are never overwritten.
 HELP
 }
 
@@ -294,8 +297,22 @@ install_packages() {
     sudo apt-get install -y "${packages[@]}"
 }
 
+install() {
+    local confirmation=${1:-}
+
+    if [ "$confirmation" != "--yes" ]; then
+        echo "This creates user command links and installs core native packages." >&2
+        echo "Run: $TOOL_ROOT/tools/install-system.sh install --yes" >&2
+        return 2
+    fi
+
+    install_links --yes
+    install_packages core --yes
+}
+
 case "${1:-status}" in
     status|check|doctor) status ;;
+    install) install "${2:-}" ;;
     links) install_links "${2:-}" ;;
     packages) install_packages "${2:-}" "${3:-}" ;;
     help|-h|--help) usage ;;

@@ -6,13 +6,16 @@ This directory contains source installation and synchronization helpers.
 
 ```bash
 tools/install-system.sh status
+tools/install-system.sh install --yes
 tools/install-system.sh links --yes
 tools/install-system.sh packages core --yes
 tools/install-system.sh packages all --yes
 ```
 
-Package installation supports Debian/Ubuntu APT hosts and never runs without
-`--yes`. Command links are user-local and existing regular files are not
+`install --yes` is the first-time setup shortcut: it creates the command links
+and installs the core package group. Package installation supports Debian/Ubuntu
+APT hosts and never runs without `--yes`; it prompts for sudo in an interactive
+terminal. Command links are user-local and existing regular files are not
 overwritten.
 
 ## Source mirror

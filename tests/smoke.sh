@@ -28,6 +28,10 @@ if "$TOOL_ROOT/tools/install-system.sh" packages core >/dev/null 2>&1; then
     echo "Unguarded package installation unexpectedly succeeded." >&2
     exit 1
 fi
+if "$TOOL_ROOT/tools/install-system.sh" install >/dev/null 2>&1; then
+    echo "Unguarded full installation unexpectedly succeeded." >&2
+    exit 1
+fi
 
 SYSTEM_INSTALL_BIN_DIR="$TEMP_DIR/bin" \
     "$TOOL_ROOT/tools/install-system.sh" links --yes >/dev/null

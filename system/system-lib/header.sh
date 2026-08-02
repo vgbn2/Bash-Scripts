@@ -10,7 +10,7 @@ COMMAND CENTER
   system status                  Hardware, storage, battery, GPU, and network.
   system monitor [section] [seconds]  Live foreground hardware monitor.
   system doctor                  Audit runtime tools, packages, and links.
-  system setup [status|links --yes|core --yes|all --yes]
+  system setup [status|install --yes|links --yes|core --yes|all --yes]
   system health [summary|run|latest]
   system repair suggest
   system repair [thermal|gpu|desktop] --yes

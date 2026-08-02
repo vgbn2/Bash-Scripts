@@ -90,11 +90,14 @@ run_setup() {
         links)
             delegate_tool "tools/install-system.sh" links "${3:-}"
             ;;
+        install)
+            delegate_tool "tools/install-system.sh" install "${3:-}"
+            ;;
         core|all)
             delegate_tool "tools/install-system.sh" packages "$action" "${3:-}"
             ;;
         *)
-            echo "Usage: system setup [status|links --yes|core --yes|all --yes]" >&2
+            echo "Usage: system setup [status|install --yes|links --yes|core --yes|all --yes]" >&2
             return 2
             ;;
     esac

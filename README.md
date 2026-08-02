@@ -15,16 +15,21 @@ Clone over HTTPS without configuring a GitHub account or SSH key:
 ```bash
 git clone https://github.com/vgbn2/Bash-Scripts.git
 cd Bash-Scripts
-tests/smoke.sh
-tools/install-system.sh status
-tools/install-system.sh links --yes
+tools/install-system.sh install --yes
+exec "$SHELL" -l
 system help
 ```
 
-`status` is read-only. The link action requires `--yes`, creates command links
-under `~/.local/bin`, and does not install packages or enable services. If
-`~/.local/bin` is not already in `PATH`, follow the command's printed guidance
-and open a new shell.
+`install --yes` is the recommended first-time setup: it creates user command
+links under `~/.local/bin`, then asks for your sudo password to install the
+core Debian/Ubuntu dependencies. It does not enable services or change
+firmware, hardware settings, or network shaping. `exec "$SHELL" -l` reloads
+your shell so the new commands are available immediately. If `~/.local/bin`
+is not already in `PATH`, follow the command's printed guidance instead.
+
+For a launcher-only setup with no package installation, use
+`tools/install-system.sh links --yes`. To inspect what is present before
+making any changes, use `tools/install-system.sh status`.
 
 ## Operating principles
 
@@ -153,6 +158,18 @@ tools/install-system.sh links --yes
 The installer links `system`, `cpu`, `system-health`, `system-repair`,
 `gaming`, and `ai` into `~/.local/bin`. It refuses to overwrite an existing
 regular file. Set `SYSTEM_INSTALL_BIN_DIR` to use a different destination.
+
+For a complete standard setup in one command, create the links and install
+the core native package group together:
+
+```bash
+tools/install-system.sh install --yes
+# Or, after links already exist:
+system setup install --yes
+```
+
+This requests your sudo password in your terminal. If you are running it from
+a non-interactive environment, open a terminal and run the command there.
 
 Install the native Debian/Ubuntu baseline only when requested:
 
