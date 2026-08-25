@@ -20,10 +20,19 @@ network commands:
   status
   processes
   connections
-  limit-download <percent> <max-mbps>
-  limit-upload <percent> <max-mbps>
-  clear-download
-  clear-upload
+  ports
+  dns [host]
+  proxy
+  vpn
+  arp
+  routes
+  pmtud [target] [size]
+  speedtest [server]
+  wifi status|scan|connect <ssid> [password]
+  limit-download <percent> <max-mbps> [interface]
+  limit-upload <percent> <max-mbps> [interface]
+  clear-download [interface]
+  clear-upload [interface]
   install-tools --yes
 HELP
             ;;

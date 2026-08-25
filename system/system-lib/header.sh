@@ -10,7 +10,7 @@ COMMAND CENTER
   system status                  Hardware, storage, battery, GPU, and network.
   system monitor [section] [seconds]  Live foreground hardware monitor.
   system doctor                  Audit runtime tools, packages, and links.
-  system setup [status|install --yes|links --yes|core --yes|all --yes]
+  system setup [status|links --yes|core --yes|all --yes]
   system health [summary|run|latest]
   system repair suggest
   system repair [thermal|gpu|desktop] --yes
@@ -43,11 +43,11 @@ HARDWARE
   system hardware summary | devices
 
 NETWORK AND SSH
-  system network [help|status|processes|connections]
-  system network limit-download <percent> <max-mbps>
-  system network limit-upload <percent> <max-mbps>
-  system network clear-download | clear-upload | install-tools --yes
-  system internet test | wifi status
+  system network [help|status|processes|connections|ports|dns [host]|proxy|vpn|arp|routes|pmtud [target] [size]|speedtest [server]]
+  system network limit-download <percent> <max-mbps> [interface]
+  system network limit-upload <percent> <max-mbps> [interface]
+  system network clear-download [interface] | clear-upload [interface] | install-tools --yes
+  system internet test | wifi status | wifi scan | wifi connect <ssid> [password] | vpn status
   system ssh [help|status|keys|install-client --yes]
 
 MAINTENANCE AND DESKTOP

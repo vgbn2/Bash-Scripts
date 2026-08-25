@@ -13,16 +13,16 @@ valid_download_limit() {
 }
 
 limit_download() {
-    local percent=${1:-} maximum=${2:-} interface rate
+    local percent=${1:-} maximum=${2:-} dev=${3:-} interface rate
 
     if ! valid_download_limit "$percent" "$maximum"; then
-        echo "Usage: system network limit-download <percent> <max-mbps>" >&2
+        echo "Usage: system network limit-download <percent> <max-mbps> [interface]" >&2
         return 2
     fi
 
-    interface=$(active_network_interface)
-    if [ -z "$interface" ]; then
-        echo "Could not find the active internet interface." >&2
+    interface=${dev:-$(active_network_interface)}
+    if [ -z "$interface" ] || [ ! -e "/sys/class/net/$interface" ]; then
+        echo "Network interface '${interface:-unknown}' not found or inactive." >&2
         return 1
     fi
 
@@ -46,28 +46,28 @@ limit_download() {
 
     sudo tc qdisc replace dev ifb0 root tbf \
         rate "${rate}mbit" burst 32kbit latency 400ms
-    echo "Download limit: ${rate} Mbps (${percent}% of ${maximum} Mbps)"
+    echo "Download limit: ${rate} Mbps (${percent}% of ${maximum} Mbps) on ${interface}"
 }
 
 clear_download_limit() {
-    local interface
-    interface=$(active_network_interface)
-    [ -n "$interface" ] && sudo tc qdisc del dev "$interface" ingress 2>/dev/null || true
+    local dev=${1:-} interface
+    interface=${dev:-$(active_network_interface)}
+    [ -n "$interface" ] && [ -e "/sys/class/net/$interface" ] && sudo tc qdisc del dev "$interface" ingress 2>/dev/null || true
     sudo tc qdisc del dev ifb0 root 2>/dev/null || true
-    echo "Download limit cleared."
+    echo "Download limit cleared on ${interface:-active interface}."
 }
 
 limit_upload() {
-    local percent=${1:-} maximum=${2:-} interface rate
+    local percent=${1:-} maximum=${2:-} dev=${3:-} interface rate
 
     if ! valid_network_limit "$percent" "$maximum"; then
-        echo "Usage: system network limit-upload <percent> <max-mbps>" >&2
+        echo "Usage: system network limit-upload <percent> <max-mbps> [interface]" >&2
         return 2
     fi
 
-    interface=$(active_network_interface)
-    if [ -z "$interface" ]; then
-        echo "Could not find the active internet interface." >&2
+    interface=${dev:-$(active_network_interface)}
+    if [ -z "$interface" ] || [ ! -e "/sys/class/net/$interface" ]; then
+        echo "Network interface '${interface:-unknown}' not found or inactive." >&2
         return 1
     fi
 
@@ -78,12 +78,12 @@ limit_upload() {
     # This affects all outgoing traffic, including rsync and SSH.
     sudo tc qdisc replace dev "$interface" root tbf \
         rate "${rate}mbit" burst 32kbit latency 400ms
-    echo "Upload limit: ${rate} Mbps (${percent}% of ${maximum} Mbps)"
+    echo "Upload limit: ${rate} Mbps (${percent}% of ${maximum} Mbps) on ${interface}"
 }
 
 clear_upload_limit() {
-    local interface
-    interface=$(active_network_interface)
-    [ -n "$interface" ] && sudo tc qdisc del dev "$interface" root 2>/dev/null || true
-    echo "Upload limit cleared."
+    local dev=${1:-} interface
+    interface=${dev:-$(active_network_interface)}
+    [ -n "$interface" ] && [ -e "/sys/class/net/$interface" ] && sudo tc qdisc del dev "$interface" root 2>/dev/null || true
+    echo "Upload limit cleared on ${interface:-active interface}."
 }

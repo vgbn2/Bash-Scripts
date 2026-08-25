@@ -13,6 +13,10 @@ done < <(
     find "$TOOL_ROOT" -type f \
         \( -name '*.sh' -o -perm -u+x \) \
         ! -path "$TOOL_ROOT/.git/*" \
+        ! -name '*.md' \
+        ! -name 'LICENSE' \
+        ! -name '.gitignore' \
+        ! -name '.gitattributes' \
         -print
 )
 
@@ -26,10 +30,6 @@ if "$TOOL_ROOT/tools/install-system.sh" links >/dev/null 2>&1; then
 fi
 if "$TOOL_ROOT/tools/install-system.sh" packages core >/dev/null 2>&1; then
     echo "Unguarded package installation unexpectedly succeeded." >&2
-    exit 1
-fi
-if "$TOOL_ROOT/tools/install-system.sh" install >/dev/null 2>&1; then
-    echo "Unguarded full installation unexpectedly succeeded." >&2
     exit 1
 fi
 

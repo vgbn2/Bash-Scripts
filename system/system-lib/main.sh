@@ -90,14 +90,11 @@ run_setup() {
         links)
             delegate_tool "tools/install-system.sh" links "${3:-}"
             ;;
-        install)
-            delegate_tool "tools/install-system.sh" install "${3:-}"
-            ;;
         core|all)
             delegate_tool "tools/install-system.sh" packages "$action" "${3:-}"
             ;;
         *)
-            echo "Usage: system setup [status|install --yes|links --yes|core --yes|all --yes]" >&2
+            echo "Usage: system setup [status|links --yes|core --yes|all --yes]" >&2
             return 2
             ;;
     esac
@@ -317,7 +314,18 @@ case "$area" in
         fi
         ;;
     wifi)
-        [ "$action" = "status" ] && show_wifi_status || show_help
+        case "$action" in
+            ""|status) show_wifi_status ;;
+            scan) scan_wifi ;;
+            connect) connect_wifi "${3:-}" "${4:-}" ;;
+            *) show_help ;;
+        esac
+        ;;
+    vpn)
+        case "$action" in
+            ""|status) show_network_vpn ;;
+            *) show_help ;;
+        esac
         ;;
     hardware)
         [ "$action" = "summary" ] && show_hardware_summary || show_help
@@ -344,11 +352,27 @@ case "$area" in
             status) show_network_status ;;
             processes) show_network_processes ;;
             connections) show_network_connections ;;
+            ports) show_network_ports ;;
+            dns) show_network_dns "${3:-}" ;;
+            proxy) show_network_proxy ;;
+            vpn) show_network_vpn ;;
+            arp) show_network_arp ;;
+            routes) show_network_routes ;;
+            pmtud) test_network_pmtud "${3:-}" "${4:-}" ;;
+            speedtest) test_network_speed "${3:-}" ;;
             install-tools) install_network_tools "${3:-}" ;;
-            limit-download) limit_download "${3:-}" "${4:-}" ;;
-            limit-upload|limit-send) limit_upload "${3:-}" "${4:-}" ;;
-            clear-download) clear_download_limit ;;
-            clear-upload|clear-send) clear_upload_limit ;;
+            limit-download) limit_download "${3:-}" "${4:-}" "${5:-}" ;;
+            limit-upload|limit-send) limit_upload "${3:-}" "${4:-}" "${5:-}" ;;
+            clear-download) clear_download_limit "${3:-}" ;;
+            clear-upload|clear-send) clear_upload_limit "${3:-}" ;;
+            wifi)
+                case "${3:-status}" in
+                    status) show_wifi_status ;;
+                    scan) scan_wifi ;;
+                    connect) connect_wifi "${4:-}" "${5:-}" ;;
+                    *) invalid_section_action network "wifi ${3:-}" ;;
+                esac
+                ;;
             *) invalid_section_action network "$action" ;;
         esac
         fi

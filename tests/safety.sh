@@ -262,6 +262,13 @@ test_system_action_guards() {
     expect_status 2 "$TOOL_ROOT/system/system" repair gpu
     expect_status 2 "$TOOL_ROOT/system/system" repair desktop
     expect_status 2 "$TOOL_ROOT/maintenance/system-repair" gpu
+    expect_status 2 "$TOOL_ROOT/system/system" network limit-download
+    expect_status 2 "$TOOL_ROOT/system/system" network limit-download 50
+    expect_status 1 "$TOOL_ROOT/system/system" network limit-download 50 100 invalid_iface_999
+    expect_status 2 "$TOOL_ROOT/system/system" network limit-upload
+    expect_status 1 "$TOOL_ROOT/system/system" network limit-upload 50 100 invalid_iface_999
+    expect_status 2 "$TOOL_ROOT/system/system" wifi connect
+    expect_status 2 "$TOOL_ROOT/system/system" network wifi connect
 }
 
 test_gaming_repair_propagation() {

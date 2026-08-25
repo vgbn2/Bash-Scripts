@@ -3,13 +3,24 @@
 Network functionality is exposed through `system network`; this directory is
 reserved for future standalone network helpers.
 
-## Read-only diagnostics
+## Read-only diagnostics & Wi-Fi / VPN
 
 ```bash
 system network status
 system network processes
 system network connections
+system network ports
+system network dns [host]
+system network proxy
+system network vpn
+system network arp
+system network routes
+system network pmtud [target] [size]
+system network speedtest [iperf-server]
 system wifi status
+system wifi scan
+system wifi connect <ssid> [password]
+system vpn status
 system internet test
 ```
 
@@ -22,10 +33,10 @@ system network install-tools --yes
 ## Traffic shaping
 
 ```bash
-system network limit-download <percent> <max-mbps>
-system network limit-upload <percent> <max-mbps>
-system network clear-download
-system network clear-upload
+system network limit-download <percent> <max-mbps> [interface]
+system network limit-upload <percent> <max-mbps> [interface]
+system network clear-download [interface]
+system network clear-upload [interface]
 ```
 
 Download shaping redirects ingress traffic through IFB. Upload shaping
