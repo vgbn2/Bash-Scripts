@@ -18,6 +18,24 @@ system games diagnose
 
 The `gaming` compatibility command exposes the same operations.
 
+## Frame Generation & Lossless Scaling
+
+Adaptive frame generation with Alder Lake P-core isolation and dedicated GPU offload:
+
+```bash
+# Witcher 3: Wild Hunt (DX12 borderless mode, 60 FPS in-engine cap, LSFG 3.0 adaptive 120 FPS target)
+system games framegen witcher [target_fps]
+system games framegen witcher status
+system games framegen witcher optimize [base_fps] [target_fps]
+
+# Total War: ROME REMASTERED
+system games framegen rome [target_fps]
+
+# Standalone Lossless Scaling companion controller
+system games lossless [start|stop|status|detect|engage|tune]
+system games fg [2x|3x|4x] [fps]
+```
+
 ## Repairs
 
 Repairs are explicit because they can stop Steam, install Flatpak runtime

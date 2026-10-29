@@ -100,6 +100,19 @@ ssh commands:
   install-client --yes
 HELP
             ;;
+        registers|inspector)
+            cat <<'HELP'
+registers/inspector commands:
+  msr [hex_register]   Read and decode CPU Model-Specific Registers (0x198, 0x1B0, 0x610, 0x150)
+  pcie [bdf]           Read PCIe configuration space, link negotiation, and AER error counters
+  gpu                  Query NVIDIA GPU hardware clocks, power, PCIe link, and throttle bitmasks
+  dmar                 Scan kernel journal for Intel VT-d DMAR faults and NVRM Xid errors
+  learn [topic]        Educational tutorial on CPU MSRs, PCIe TLPs, IOMMU, and GPU registers
+HELP
+            ;;
+        security|pentest|cybersec)
+            delegate_tool "security/security" help
+            ;;
         *)
             echo "No interactive help is defined for: $section" >&2
             return 2

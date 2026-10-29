@@ -17,7 +17,7 @@ show_thermals() {
         [ -e "$device" ] || continue
         if smart_output=$(sudo nvme smart-log "$device" 2>/dev/null); then
             temperature=$(nvme_value "$smart_output" temperature)
-            printf '%s: %s\n' "$device" "$temperature"
+            printf '%s: %s\n' "$device" "$(format_temperature_c "$temperature")"
         else
             printf '%s: unavailable\n' "$device"
         fi

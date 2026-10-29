@@ -21,6 +21,7 @@ commands:
   full                performance profile + 4.4 GHz + turbo on
   profile <name>      set platform profile: low-power/balanced/performance/max-power/custom
   turbo on|off        enable or disable turbo
+  undervolt [mV]      show or set CPU undervolt offset
 USAGE
 }
 
@@ -125,6 +126,11 @@ status() {
     printf 'load=%s\n' "$(load_1m)"
     printf 'cpu_max_khz=%s\n' "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null || echo unknown)"
     printf 'cpu_cur_khz=%s\n' "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo unknown)"
+    if command -v undervolt >/dev/null 2>&1; then
+        local uv_core
+        uv_core=$(sudo undervolt --read 2>/dev/null | awk '/^core:/ {print $2, $3}' || true)
+        [ -n "$uv_core" ] && printf 'undervolt_core=%s\n' "$uv_core"
+    fi
 }
 
 cmd=${1:-}
@@ -132,6 +138,13 @@ case "$cmd" in
     [0-9]*|.[0-9]*) set_cpu "$cmd" ;;
     status) status ;;
     cpu) set_cpu "${2:-}" ;;
+    undervolt)
+        if [ -z "${2:-}" ]; then
+            "$(dirname "$0")/undervolt" status
+        else
+            "$(dirname "$0")/undervolt" cpu "${2:-}" "${3:-}"
+        fi
+        ;;
     recommend) recommend_cpu ;;
     cool)
         set_profile low-power

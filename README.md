@@ -120,6 +120,8 @@ Compatibility entry points remain available through small symlinks in
 ```bash
 system help
 cpu status
+undervolt status
+undervolt eval 5
 system-health
 system-repair suggest
 gaming help

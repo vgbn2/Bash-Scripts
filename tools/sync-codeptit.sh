@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-SOURCE_DIR="${CODEPTIT_SOURCE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)/}"
+SOURCE_DIR="${CODEPTIT_SOURCE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)/}"
 TARGET_HOST="${CODEPTIT_SYNC_HOST:-}"
 TARGET_DIR="${CODEPTIT_SYNC_DIR:-}"
 BWLIMIT="${CODEPTIT_SYNC_BWLIMIT:-5000}"

@@ -24,6 +24,7 @@ WORKLOADS
 
 HARDWARE
   system cpu [status|cool|balanced|game|full|<GHz>]
+  system undervolt [status|profile [name]|calculus [min] [max]|cpu <mV>|cpu-power <W>|gpu <MHz>|gpu-power <W>|reset]
   system ram status | battery status | gpu status | gpu health
   system thermals status | thermals once [C] | thermals watch [C] [seconds]
   system ssd health | ssd raw /dev/nvmeNnM
@@ -41,14 +42,16 @@ HARDWARE
   system firmware [refresh --yes|update --yes|install-tools --yes]
   system cooling [help|status|profile [name]|install-tools --yes]
   system hardware summary | devices
+  system registers [msr|pcie|gpu|dmar|learn]
 
-NETWORK AND SSH
+NETWORK, SSH, AND CYBERSECURITY
   system network [help|status|processes|connections|ports|dns [host]|proxy|vpn|arp|routes|pmtud [target] [size]|speedtest [server]]
   system network limit-download <percent> <max-mbps> [interface]
   system network limit-upload <percent> <max-mbps> [interface]
   system network clear-download [interface] | clear-upload [interface] | install-tools --yes
   system internet test | wifi status | wifi scan | wifi connect <ssid> [password] | vpn status
   system ssh [help|status|keys|install-client --yes]
+  system security [audit [host|ssh|ports|firewall]|scan [subnet]|ports <target>|headers <url>|ssl <host>|capacity <url>|exposure|kali [status|claude]|cheatsheet [topic]]
 
 MAINTENANCE AND DESKTOP
   system errors [summary|oom|gpu|storage|network|full]
@@ -79,8 +82,12 @@ show_command_center() {
   system display status          Monitors and brightness
   system firmware status         BIOS and fwupd-managed devices
   system cooling status          Temperatures and firmware fan profiles
+  system undervolt status        CPU/GPU undervolt offsets and power limits
+  system registers msr           Inspect CPU MSRs, PCIe link, GPU, and IOMMU registers
   system network processes       Live bandwidth by process
   system ssh status              SSH client/server and port status
+  system security audit host     Host hardening, ports, and firewall audit
+  system security cheatsheet     Recon, web, TLS, and defensive capacity cheatsheet
 
   system help                    Full command reference
 MENU

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# fan — Cooling, fan, and thermal status inspector
+# ponytail: native sensors / hwmon inspection wrapper
+set -euo pipefail
+
+echo "=== System Thermal & Fan Status ==="
+if command -v sensors >/dev/null 2>&1; then
+  sensors 2>/dev/null | grep -E 'Package id 0:|Core [0-9]+:|Composite:|fan[0-9]*|RPM|temp[0-9]+:' || sensors
+else
+  echo "sensors utility not found."
+fi
+
+# Check if Dell fan control service is active
+if systemctl is-active --quiet dell-fan-control.service 2>/dev/null; then
+  echo "dell-fan-control.service: active"
+fi

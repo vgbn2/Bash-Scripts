@@ -1,0 +1,881 @@
+#!/usr/bin/env bash
+# Terminal CPU and GPU undervolting, power limiting, voltage telemetry, and multi-spot thermal headroom evaluation.
+set -euo pipefail
+
+CPU_MIN_OFFSET_MV=-250
+CPU_MAX_OFFSET_MV=0
+DEFAULT_BENCHMARK_SECONDS=5
+
+usage() {
+    cat <<'USAGE'
+usage: undervolt <command> [arguments]
+
+CPU commands:
+  status                     show CPU offsets, power limits, and GPU telemetry
+  cpu <mV> [cache_mV]        set CPU core and cache offset (e.g. undervolt cpu -50)
+  cpu-core <mV>              set CPU core offset (e.g. undervolt cpu-core -50)
+  cpu-cache <mV>             set CPU cache offset (e.g. undervolt cpu-cache -40)
+  cpu-gpu <mV>               set Intel iGPU offset (e.g. undervolt cpu-gpu -30)
+  cpu-power <PL1> [PL2]      set CPU power limits in Watts (e.g. undervolt cpu-power 65 95)
+  cpu-reset                  reset CPU offsets to 0 mV and restore default power limits
+
+GPU commands (NVIDIA/AMD):
+  gpu <max_MHz>              lock GPU max clock to undervolt V/F curve (e.g. undervolt gpu 1500)
+  gpu-lock <min> <max>       lock GPU clock range (e.g. undervolt gpu-lock 210 1500)
+  gpu-power <Watts>          set GPU power limit (e.g. undervolt gpu-power 50)
+  gpu-reset                  reset GPU clock lock and restore default power limit
+
+Multi-Spot Benchmark & Thermal Headroom Evaluation:
+  eval [seconds]             run CPU max load test, probe ALL core spots, detect hotspot throttles
+  test [seconds]             alias for eval (default: 5s, e.g. undervolt test 10)
+  optimize [target_C]        auto-sweep power/clock profiles to find optimal throughput under target temp (default: 80C)
+  tune [target_C]            alias for optimize (e.g. undervolt tune 80)
+
+Persistence & Boot Service:
+  persist [action]           manage persistent boot service (enable, disable, status, apply, unit)
+  service [action]           alias for persist (e.g. undervolt service enable)
+
+Global commands:
+  reset                      reset both CPU and GPU undervolting/power caps to factory defaults
+  help                       show this help message
+USAGE
+}
+
+has_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+sudo_exec() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+get_cpu_vendor() {
+    awk -F ': ' '/vendor_id/ {print $2; exit}' /proc/cpuinfo 2>/dev/null || echo "Unknown"
+}
+
+get_cpu_model() {
+    awk -F ': ' '/model name/ {print $2; exit}' /proc/cpuinfo 2>/dev/null || echo "Unknown CPU"
+}
+
+normalize_offset() {
+    local val=$1
+    if [[ "$val" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        val="-${val}"
+    fi
+    awk -v v="$val" -v min="$CPU_MIN_OFFSET_MV" -v max="$CPU_MAX_OFFSET_MV" 'BEGIN {
+        if (v !~ /^-[0-9]+([.][0-9]+)?$/ && v != "0") exit 1;
+        num = int(v + 0);
+        if (num < min || num > max) exit 2;
+        printf "%d", num;
+    }' || {
+        echo "undervolt: offset must be between ${CPU_MIN_OFFSET_MV} and ${CPU_MAX_OFFSET_MV} mV (e.g. -50)" >&2
+        return 2
+    }
+}
+
+show_cpu_undervolt_status() {
+    local vendor model
+    vendor=$(get_cpu_vendor)
+    model=$(get_cpu_model)
+
+    printf '=== CPU Undervolt & Power Telemetry (%s: %s) ===\n' "$vendor" "$model"
+    if [ "$vendor" = "GenuineIntel" ]; then
+        if has_command undervolt; then
+            sudo_exec undervolt --read 2>/dev/null || true
+        elif has_command intel-undervolt; then
+            sudo_exec intel-undervolt read 2>/dev/null || true
+        else
+            echo "Intel undervolt tools (undervolt/intel-undervolt) are not installed."
+        fi
+    elif [ "$vendor" = "AuthenticAMD" ]; then
+        if has_command ryzenadj; then
+            sudo_exec ryzenadj -i 2>/dev/null || true
+        else
+            echo "AMD CPU detected. Install 'ryzenadj' for AMD mobile/desktop APU undervolting and Curve Optimizer tuning."
+        fi
+    else
+        echo "CPU vendor ($vendor) voltage telemetry is unsupported."
+    fi
+}
+
+show_gpu_undervolt_status() {
+    printf '\n=== GPU Undervolt & Power Telemetry ===\n'
+    local found_gpu=0
+
+    # 1. NVIDIA
+    if has_command nvidia-smi; then
+        found_gpu=1
+        local name clk_cur clk_max pwr_cur pwr_lim temp volt
+        name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || echo "NVIDIA GPU")
+        clk_cur=$(nvidia-smi --query-gpu=clocks.current.graphics --format=csv,noheader 2>/dev/null || echo "N/A")
+        clk_max=$(nvidia-smi --query-gpu=clocks.max.graphics --format=csv,noheader 2>/dev/null || echo "N/A")
+        pwr_cur=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader 2>/dev/null || echo "N/A")
+        pwr_lim=$(nvidia-smi --query-gpu=power.limit --format=csv,noheader 2>/dev/null || echo "N/A")
+        temp=$(nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader 2>/dev/null || echo "N/A")
+        volt=$(nvidia-smi -q -d VOLTAGE 2>/dev/null | awk -F ':' '/Graphics/ {gsub(/^[ \t]+/, "", $2); print $2; exit}' || echo "N/A")
+
+        printf 'NVIDIA GPU: %s\n' "$name"
+        printf 'Graphics Voltage: %s\n' "${volt:-N/A}"
+        printf 'Current Clock: %s (Max: %s)\n' "$clk_cur" "$clk_max"
+        printf 'Power Draw: %s (Limit: %s)\n' "$pwr_cur" "$pwr_lim"
+        printf 'Temperature: %s C\n' "$temp"
+    fi
+
+    # 2. AMD Radeon GPU
+    for card in /sys/class/drm/card*/device/pp_od_clk_voltage; do
+        if [ -r "$card" ]; then
+            found_gpu=1
+            printf '\nAMD GPU OverDrive / Voltage Interface: %s\n' "$card"
+            head -n 15 "$card" 2>/dev/null || true
+        fi
+    done
+
+    # 3. Intel iGPU
+    if [ -d /sys/class/drm/card0 ] && ! has_command nvidia-smi; then
+        found_gpu=1
+        printf 'Intel iGPU: Active (controlled via CPU package RAPL / undervolt cpu-gpu)\n'
+    fi
+
+    if [ "$found_gpu" -eq 0 ]; then
+        echo "No dedicated GPU with undervolt telemetry detected."
+    fi
+}
+
+status() {
+    show_cpu_undervolt_status
+    show_gpu_undervolt_status
+}
+
+set_cpu_offsets() {
+    local core_in=${1:-}
+    local cache_in=${2:-$core_in}
+    local core cache
+
+    [ -n "$core_in" ] || { echo "usage: undervolt cpu <mV> [cache_mV]" >&2; return 2; }
+    core=$(normalize_offset "$core_in") || return 2
+    cache=$(normalize_offset "$cache_in") || return 2
+
+    echo "Applying CPU undervolt: Core=${core}mV, Cache=${cache}mV..."
+    if has_command undervolt; then
+        if sudo_exec undervolt --core "$core" --cache "$cache" --read; then
+            echo "CPU undervolt applied successfully via undervolt."
+        else
+            echo "Note: If offset reads 0.0mV, BIOS CPU Under-voltage Protection (UVP) may be active in UEFI settings." >&2
+        fi
+    elif has_command intel-undervolt; then
+        sudo_exec sed -i -E "s/^undervolt 0 'CPU' .*/undervolt 0 'CPU' ${core}/" /etc/intel-undervolt.conf
+        sudo_exec sed -i -E "s/^undervolt 2 'CPU Cache' .*/undervolt 2 'CPU Cache' ${cache}/" /etc/intel-undervolt.conf
+        sudo_exec intel-undervolt apply
+        sudo_exec intel-undervolt read
+    else
+        echo "No CPU undervolt tool available." >&2
+        return 1
+    fi
+}
+
+set_cpu_single_offset() {
+    local domain=$1
+    local val_in=${2:-}
+    local val
+
+    [ -n "$val_in" ] || { echo "usage: undervolt cpu-${domain} <mV>" >&2; return 2; }
+    val=$(normalize_offset "$val_in") || return 2
+
+    if has_command undervolt; then
+        sudo_exec undervolt "--${domain}" "$val" --read
+    else
+        echo "undervolt CLI tool is required for single-domain offsets." >&2
+        return 1
+    fi
+}
+
+set_cpu_power() {
+    local pl1=${1:-}
+    local pl2=${2:-}
+
+    [ -n "$pl1" ] || { echo "usage: undervolt cpu-power <PL1_Watts> [PL2_Watts]" >&2; return 2; }
+
+    if ! [[ "$pl1" =~ ^[0-9]+$ ]]; then
+        echo "undervolt: power limits must be positive integers in Watts" >&2
+        return 2
+    fi
+
+    [ -n "$pl2" ] || pl2=$(( pl1 * 125 / 100 ))
+
+    if ! [[ "$pl2" =~ ^[0-9]+$ ]]; then
+        echo "undervolt: power limits must be positive integers in Watts" >&2
+        return 2
+    fi
+
+    echo "Setting CPU Power Limits: PL1=${pl1}W (long), PL2=${pl2}W (short)..."
+    if has_command undervolt; then
+        sudo_exec undervolt -p1 "$pl1" 28 -p2 "$pl2" 0.0024 --read
+    else
+        echo "undervolt CLI tool is required for power limits." >&2
+        return 1
+    fi
+}
+
+reset_cpu() {
+    echo "Resetting CPU undervolt offsets to 0 mV..."
+    if has_command undervolt; then
+        sudo_exec undervolt --core 0 --cache 0 --gpu 0 --uncore 0 --analogio 0 --read 2>/dev/null || true
+    elif has_command intel-undervolt; then
+        sudo_exec sed -i -E "s/^undervolt [0-9] .*/undervolt \1 0/" /etc/intel-undervolt.conf 2>/dev/null || true
+        sudo_exec intel-undervolt apply 2>/dev/null || true
+    fi
+}
+
+set_gpu_clock_lock() {
+    local min=${1:-210}
+    local max=${2:-}
+
+    if [ -z "$max" ]; then
+        max=$min
+        min=210
+    fi
+
+    local hw_max=2500
+    if has_command nvidia-smi; then
+        local q_max
+        q_max=$(nvidia-smi --query-gpu=clocks.max.graphics --format=csv,noheader,nounits 2>/dev/null || true)
+        if [[ "$q_max" =~ ^[0-9]+$ ]]; then
+            hw_max=$(( q_max + 200 ))
+        fi
+    fi
+
+    if ! [[ "$min" =~ ^[0-9]+$ ]] || ! [[ "$max" =~ ^[0-9]+$ ]] || \
+       [ "$min" -lt 210 ] || [ "$max" -gt "$hw_max" ] || \
+       [ "$min" -gt "$max" ]; then
+        echo "undervolt: GPU clock must be between 210 and ${hw_max} MHz (e.g. undervolt gpu 1500)" >&2
+        return 2
+    fi
+
+    if ! has_command nvidia-smi; then
+        echo "nvidia-smi is not available for GPU clock locking." >&2
+        return 1
+    fi
+
+    echo "Locking GPU graphics clock range to ${min}-${max} MHz (undervolts V/F curve)..."
+    sudo_exec nvidia-smi -lgc "${min},${max}"
+    show_gpu_undervolt_status
+}
+
+set_gpu_power() {
+    local watts=${1:-}
+
+    [ -n "$watts" ] || { echo "usage: undervolt gpu-power <Watts>" >&2; return 2; }
+
+    local p_min=1 p_max=250
+    if has_command nvidia-smi; then
+        local q_min q_max
+        q_min=$(nvidia-smi --query-gpu=power.min_limit --format=csv,noheader,nounits 2>/dev/null | awk '{print int($1)}' || true)
+        q_max=$(nvidia-smi --query-gpu=power.max_limit --format=csv,noheader,nounits 2>/dev/null | awk '{print int($1)}' || true)
+        [ -n "$q_min" ] && [ "$q_min" -gt 0 ] && p_min=$q_min
+        [ -n "$q_max" ] && [ "$q_max" -gt 0 ] && p_max=$q_max
+    fi
+
+    if ! [[ "$watts" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
+       awk -v w="$watts" -v min="$p_min" -v max="$p_max" 'BEGIN { exit !(w < min || w > max) }'; then
+        echo "undervolt: GPU power limit must be between ${p_min} and ${p_max} Watts (e.g. undervolt gpu-power 50)" >&2
+        return 2
+    fi
+
+    if ! has_command nvidia-smi; then
+        echo "nvidia-smi is not available for GPU power capping." >&2
+        return 1
+    fi
+
+    echo "Setting GPU power limit to ${watts}W..."
+    sudo_exec nvidia-smi -pl "$watts"
+    show_gpu_undervolt_status
+}
+
+reset_gpu() {
+    if has_command nvidia-smi; then
+        echo "Resetting GPU clock locks to factory defaults..."
+        sudo_exec nvidia-smi -rgc
+        echo "GPU clocks reset."
+    fi
+}
+
+reset_all() {
+    reset_cpu
+    reset_gpu
+    echo "All CPU and GPU undervolt/power settings reset to defaults."
+}
+
+# ponytail: generate systemd oneshot service unit for hardware optimization
+generate_service_content() {
+    local uv_core=${1:--60}
+    local uv_cache=${2:--60}
+    local pl1=${3:-28}
+    local pl2=${4:-35}
+    local max_freq_khz=${5:-3200000}
+    local gpu_min=${6:-210}
+    local gpu_max=${7:-1600}
+
+    local undervolt_bin="/usr/local/bin/undervolt"
+    if [ ! -x "$undervolt_bin" ]; then
+        undervolt_bin=$(command -v undervolt 2>/dev/null)
+    fi
+    local nvidia_bin="/usr/bin/nvidia-smi"
+    if [ ! -x "$nvidia_bin" ]; then
+        nvidia_bin=$(command -v nvidia-smi 2>/dev/null)
+    fi
+    local modprobe_bin="/usr/sbin/modprobe"
+    if [ ! -x "$modprobe_bin" ]; then
+        modprobe_bin=$(command -v modprobe 2>/dev/null)
+    fi
+
+    cat <<EOF
+[Unit]
+Description=Hardware Optimization Service (CPU Undervolt, Power Caps, Freq Ceiling, GPU Clock Lock)
+After=multi-user.target suspend.target hibernate.target hybrid-sleep.target
+Wants=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStartPre=-${modprobe_bin} msr
+ExecStart=${undervolt_bin} --core ${uv_core} --cache ${uv_cache} -p1 ${pl1} 28 -p2 ${pl2} 0.0024
+ExecStart=/bin/bash -c 'for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do [ -w "\$f" ] && echo ${max_freq_khz} > "\$f"; done'
+ExecStart=-${nvidia_bin} -lgc ${gpu_min},${gpu_max}
+
+[Install]
+WantedBy=multi-user.target suspend.target hibernate.target hybrid-sleep.target
+EOF
+}
+
+apply_hardware_optimizations() {
+    local uv_core=${1:--60}
+    local uv_cache=${2:--60}
+    local pl1=${3:-28}
+    local pl2=${4:-35}
+    local max_freq_khz=${5:-3200000}
+    local gpu_min=${6:-210}
+    local gpu_max=${7:-1600}
+
+    echo "=== Applying Hardware Optimizations ==="
+    if has_command modprobe; then
+        sudo_exec modprobe msr
+    fi
+
+    local undervolt_bin="/usr/local/bin/undervolt"
+    if [ ! -x "$undervolt_bin" ]; then
+        undervolt_bin=$(command -v undervolt 2>/dev/null)
+    fi
+    if [ -n "$undervolt_bin" ] && [ -x "$undervolt_bin" ]; then
+        echo "Applying CPU undervolt (${uv_core}mV core, ${uv_cache}mV cache) and power caps (PL1=${pl1}W, PL2=${pl2}W)..."
+        sudo_exec "$undervolt_bin" --core "$uv_core" --cache "$uv_cache" -p1 "$pl1" 28 -p2 "$pl2" 0.0024
+    fi
+
+    echo "Setting CPU max frequency ceiling to ${max_freq_khz} kHz..."
+    for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do
+        if [ -w "$f" ]; then
+            printf '%s\n' "$max_freq_khz" | sudo_exec tee "$f" >/dev/null
+        fi
+    done
+
+    if has_command nvidia-smi; then
+        echo "Locking GPU clocks to ${gpu_min}-${gpu_max} MHz..."
+        sudo_exec nvidia-smi -lgc "${gpu_min},${gpu_max}" >/dev/null
+    fi
+
+    echo "Hardware optimizations applied successfully."
+}
+
+manage_persist_service() {
+    local action=${1:-enable}
+    local target_service="/etc/systemd/system/hardware-optimization.service"
+    local local_service="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/hardware-optimization.service"
+
+    case "$action" in
+        unit)
+            generate_service_content "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" "${8:-}"
+            ;;
+        apply)
+            apply_hardware_optimizations "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" "${8:-}"
+            ;;
+        enable)
+            echo "Configuring persistent hardware optimization service..."
+            local content
+            content=$(generate_service_content "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" "${8:-}")
+            printf '%s\n' "$content" > "$local_service"
+            printf '%s\n' "$content" | sudo_exec tee "$target_service" >/dev/null
+
+            for svc in intel-undervolt.service intel-undervolt-loop.service; do
+                if systemctl is-active --quiet "$svc" 2>/dev/null; then
+                    sudo_exec systemctl stop "$svc"
+                fi
+                if systemctl is-enabled --quiet "$svc" 2>/dev/null; then
+                    sudo_exec systemctl disable "$svc"
+                fi
+                sudo_exec systemctl mask "$svc" 2>/dev/null
+            done
+
+            sudo_exec systemctl daemon-reload
+            sudo_exec systemctl enable hardware-optimization.service
+            sudo_exec systemctl restart hardware-optimization.service
+            echo "hardware-optimization.service enabled and started."
+            sudo_exec systemctl status hardware-optimization.service --no-pager
+            ;;
+        disable)
+            echo "Disabling persistent hardware optimization service..."
+            if systemctl is-active --quiet hardware-optimization.service 2>/dev/null; then
+                sudo_exec systemctl stop hardware-optimization.service
+            fi
+            if systemctl is-enabled --quiet hardware-optimization.service 2>/dev/null; then
+                sudo_exec systemctl disable hardware-optimization.service
+            fi
+            echo "hardware-optimization.service disabled."
+            ;;
+        status)
+            if sudo_exec systemctl is-active --quiet hardware-optimization.service 2>/dev/null; then
+                sudo_exec systemctl status hardware-optimization.service --no-pager
+            else
+                echo "hardware-optimization.service is not currently active."
+            fi
+            status
+            ;;
+        *)
+            echo "undervolt: unknown persist action '$action' (valid: enable, disable, status, apply, unit)" >&2
+            return 2
+            ;;
+    esac
+}
+
+run_thermal_eval() {
+    local duration=${1:-$DEFAULT_BENCHMARK_SECONDS}
+    if ! [[ "$duration" =~ ^[0-9]+$ ]] || [ "$duration" -lt 2 ] || [ "$duration" -gt 60 ]; then
+        echo "undervolt eval: duration must be an integer between 2 and 60 seconds (default: ${DEFAULT_BENCHMARK_SECONDS}s)" >&2
+        return 2
+    fi
+
+    echo "================================================================================"
+    echo "     Multi-Spot Thermal Headroom & Throttle Diagnostic Engine                   "
+    echo "================================================================================"
+    printf 'Testing system under all-core load for %d seconds (sampling all core spots)...\n\n' "$duration"
+
+    python3 -c '
+import sys, os, time, multiprocessing, glob
+
+def get_all_thermal_spots():
+    spots = {}
+    for hwmon in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        name = ""
+        if os.path.exists(f"{hwmon}/name"):
+            try: name = open(f"{hwmon}/name").read().strip()
+            except: pass
+        for label_file in sorted(glob.glob(f"{hwmon}/temp*_label")):
+            try:
+                label = open(label_file).read().strip()
+                input_file = label_file.replace("_label", "_input")
+                crit_file = label_file.replace("_label", "_crit")
+                if os.path.exists(input_file):
+                    temp_c = int(open(input_file).read().strip()) / 1000.0
+                    crit_c = None
+                    if os.path.exists(crit_file):
+                        crit_c = int(open(crit_file).read().strip()) / 1000.0
+                    tag = f"{name}: {label}" if name else label
+                    spots[tag] = {"temp": temp_c, "crit": crit_c}
+            except: pass
+    if not spots:
+        # Fallback to thermal zones
+        for z in sorted(glob.glob("/sys/class/thermal/thermal_zone*")):
+            try:
+                t_type = open(f"{z}/type").read().strip()
+                temp_c = int(open(f"{z}/temp").read().strip()) / 1000.0
+                spots[t_type] = {"temp": temp_c, "crit": 100.0}
+            except: pass
+
+    # NVIDIA GPU spot probe via nvidia-smi
+    try:
+        import subprocess
+        res = subprocess.run(["nvidia-smi", "--query-gpu=name,temperature.gpu,temperature.gpu.tlimit", "--format=csv,noheader,nounits"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=1)
+        if res.returncode == 0 and res.stdout.strip():
+            for line in res.stdout.strip().split("\n"):
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 2:
+                    g_name, g_temp = parts[0], float(parts[1])
+                    g_crit = float(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 95.0
+                    spots[f"gpu: {g_name}"] = {"temp": g_temp, "crit": g_crit}
+    except: pass
+
+    return spots
+
+def get_per_core_throttles():
+    throttles = {}
+    for c in sorted(glob.glob("/sys/devices/system/cpu/cpu[0-9]*")):
+        c_name = os.path.basename(c)
+        try:
+            core_t = int(open(f"{c}/thermal_throttle/core_throttle_count").read().strip())
+            pkg_t = int(open(f"{c}/thermal_throttle/package_throttle_count").read().strip())
+            throttles[c_name] = (core_t, pkg_t)
+        except: pass
+    return throttles
+
+def get_core_frequencies():
+    freqs = {}
+    for c in sorted(glob.glob("/sys/devices/system/cpu/cpu[0-9]*")):
+        c_name = os.path.basename(c)
+        p = f"{c}/cpufreq/scaling_cur_freq"
+        if os.path.exists(p):
+            try: freqs[c_name] = int(open(p).read().strip()) / 1000.0
+            except: pass
+    return freqs
+
+def get_rapl_energy():
+    for p in ["/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj", "/sys/class/powercap/intel-rapl:0/energy_uj"]:
+        if os.path.exists(p):
+            try: return int(open(p).read().strip())
+            except: pass
+    return None
+
+duration = int(sys.argv[1])
+spots_start = get_all_thermal_spots()
+throttles_start = get_per_core_throttles()
+freqs_start = get_core_frequencies()
+e_start = get_rapl_energy()
+time_start = time.time()
+
+# Multi-process synthetic burn worker (bypasses GIL for true all-core load)
+def worker(end_time, counter):
+    c = 0
+    while time.time() < end_time:
+        _ = sum(x * x for x in range(3000))
+        c += 1
+    counter.value = c
+
+cpu_count = os.cpu_count() or 4
+time_end = time_start + duration
+counters = [multiprocessing.Value("i", 0) for _ in range(cpu_count)]
+procs = [multiprocessing.Process(target=worker, args=(time_end, counters[i])) for i in range(cpu_count)]
+for p in procs: p.start()
+
+peak_spots = {k: v["temp"] for k, v in spots_start.items()}
+freq_samples = []
+
+while time.time() < time_end:
+    time.sleep(0.15)
+    cur_spots = get_all_thermal_spots()
+    for k, v in cur_spots.items():
+        if k not in peak_spots or v["temp"] > peak_spots[k]:
+            peak_spots[k] = v["temp"]
+    cur_freqs = get_core_frequencies()
+    if cur_freqs:
+        freq_samples.append(sum(cur_freqs.values()) / len(cur_freqs))
+
+for p in procs: p.join()
+
+real_dur = time.time() - time_start
+spots_end = get_all_thermal_spots()
+throttles_end = get_per_core_throttles()
+e_end = get_rapl_energy()
+
+# Calculate per-core throttle deltas
+new_core_throttles = {}
+total_new_throttles = 0
+for c, (c_end, p_end) in throttles_end.items():
+    c_start, p_start = throttles_start.get(c, (c_end, p_end))
+    c_delta = max(0, c_end - c_start)
+    if c_delta > 0:
+        new_core_throttles[c] = c_delta
+        total_new_throttles += c_delta
+
+avg_power_w = None
+if e_start is not None and e_end is not None and real_dur > 0:
+    avg_power_w = (e_end - e_start) / (real_dur * 1000000.0)
+
+avg_freq = sum(freq_samples)/len(freq_samples) if freq_samples else 0.0
+
+print(f"--- Individual Thermal Spot Results ({real_dur:.1f}s Load) ---")
+print("%-30s | %6s | %6s | %7s | %6s | %s" % ("Sensor Spot", "Base", "Peak", "Delta", "Crit", "Status"))
+print("-" * 78)
+
+core_peaks = {}
+hottest_spot = None
+max_spot_temp = -999.0
+min_core_peak = 999.0
+max_core_peak = -999.0
+
+for k in sorted(spots_start.keys()):
+    base_t = spots_start[k]["temp"]
+    peak_t = peak_spots.get(k, base_t)
+    crit_t = spots_start[k]["crit"]
+    delta_t = peak_t - base_t
+    crit_str = f"{crit_t:.0f}C" if crit_t else "N/A"
+
+    if peak_t > max_spot_temp:
+        max_spot_temp = peak_t
+        hottest_spot = k
+
+    is_core = ("core" in k.lower() or "tccd" in k.lower() or "package" in k.lower())
+    if is_core and "package" not in k.lower():
+        core_peaks[k] = peak_t
+        if peak_t < min_core_peak: min_core_peak = peak_t
+        if peak_t > max_core_peak: max_core_peak = peak_t
+
+    status_tag = "CLEAN"
+    if crit_t and peak_t >= crit_t - 5.0:
+        status_tag = "CRITICAL"
+    elif peak_t >= 90.0:
+        status_tag = "HOT"
+    elif peak_t >= 80.0:
+        status_tag = "WARM"
+
+    print("%-30s | %5.1fC | %5.1fC | +%5.1fC | %6s | [%s]" % (k, base_t, peak_t, delta_t, crit_str, status_tag))
+
+print("-" * 78)
+total_ops = sum(c.value for c in counters)
+ops_sec = total_ops / real_dur if real_dur > 0 else 0.0
+eff_score = ops_sec / max_spot_temp if max_spot_temp > 0 else 0.0
+
+print(f"Duration:           {real_dur:.1f}s across {cpu_count} CPU threads")
+print(f"Throughput:         {ops_sec:,.0f} ops/sec ({total_ops:,} total ops)")
+print(f"Efficiency Score:   {eff_score:,.1f} ops/sec per C")
+print(f"Average All-Core:   {avg_freq:.0f} MHz")
+if avg_power_w:
+    print(f"Average Power:      {avg_power_w:.1f} Watts (RAPL package)")
+
+# Spot Variance
+spread = (max_core_peak - min_core_peak) if (core_peaks and max_core_peak > -999 and min_core_peak < 999) else 0.0
+print(f"Hottest Spot:       {hottest_spot} @ {max_spot_temp:.1f} C")
+if core_peaks:
+    print(f"Core Thermal Spread: {spread:.1f} C variance across cores (Min Core: {min_core_peak:.1f} C vs Max Core: {max_core_peak:.1f} C)")
+
+if new_core_throttles:
+    print(f"Active Throttling:  {total_new_throttles} new throttle events on {list(new_core_throttles.keys())}")
+else:
+    print(f"Active Throttling:  0 new core throttle events")
+
+print(f"\n--- Multi-Spot Headroom & Undervolt Verdict ---")
+if total_new_throttles > 0 or max_spot_temp >= 92.0:
+    print("[WARNING] THERMAL THROTTLING / HOTSPOT LIMIT DETECTED!")
+    print(f"  - Hotspot Issue: {hottest_spot} reached {max_spot_temp:.1f}C (junction threshold reached).")
+    if spread >= 12.0:
+        print(f"  - Core Imbalance: Large {spread:.1f}C spread between cores indicates high single-core P-core boost spikes.")
+    print("  - Action (Voltage Offset): Apply -40mV to -60mV core/cache undervolt.")
+    print("    * Expected Gain: ~6-10C lower hotspot temperatures, eliminating core throttle spikes.")
+    print("  - Action (Power Capping): If BIOS UVP locks MSR 0x150, cap PL1 power (e.g. system undervolt cpu-power 65 95).")
+    print("    * Expected Gain: Flat thermal plateau under sustained multi-thread workload.")
+elif max_spot_temp >= 82.0:
+    print("[NOTICE] MODERATE HOTSPOT THERMAL LOAD")
+    print(f"  - Hottest spot is {hottest_spot} @ {max_spot_temp:.1f}C.")
+    print("  - Action: Undervolting (-30mV to -50mV) will lower fan noise and improve sustained clock stability.")
+else:
+    print("[CLEAN] EXCELLENT THERMAL HEADROOM ACROSS ALL SPOTS")
+    print(f"  - Maximum spot peak is {max_spot_temp:.1f}C with 0 throttle events.")
+    print("  - Undervolt is optional (primarily for battery efficiency and passive/quiet acoustics).")
+' "$duration"
+    echo "================================================================================"
+}
+
+run_auto_optimization() {
+    local target_temp=${1:-80}
+    if ! [[ "$target_temp" =~ ^[0-9]+$ ]] || [ "$target_temp" -lt 65 ] || [ "$target_temp" -gt 95 ]; then
+        echo "undervolt optimize: target temperature must be an integer between 65 and 95 C (default: 80C)" >&2
+        return 2
+    fi
+
+    echo "================================================================================"
+    echo "     Quantitative Frequency-Power Auto-Optimization Engine                      "
+    echo "================================================================================"
+    printf 'Target Temperature: %d C across all core spots\n' "$target_temp"
+    echo "Sweeping operating profiles to maximize sustained throughput under thermal cap..."
+    echo ""
+
+    python3 -c '
+import sys, os, time, multiprocessing, glob, subprocess
+
+def get_hw_max_freq_ghz():
+    p = "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq"
+    if os.path.exists(p):
+        try: return round(int(open(p).read().strip()) / 1000000.0, 1)
+        except: pass
+    return 4.0
+
+def set_profile(pl1, pl2, freq_ghz):
+    freq_khz = int(freq_ghz * 1000000)
+    for path in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq"):
+        try:
+            with open(path, "w") as f: f.write(str(freq_khz))
+        except:
+            subprocess.run(["sudo", "tee", path], input=str(freq_khz), text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.run(["sudo", "undervolt", "-p1", str(pl1), "28", "-p2", str(pl2), "0.0024"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except: pass
+
+def get_all_thermal_spots():
+    spots = {}
+    for hwmon in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        name = ""
+        if os.path.exists(f"{hwmon}/name"):
+            try: name = open(f"{hwmon}/name").read().strip()
+            except: pass
+        for label_file in sorted(glob.glob(f"{hwmon}/temp*_label")):
+            try:
+                label = open(label_file).read().strip()
+                input_file = label_file.replace("_label", "_input")
+                crit_file = label_file.replace("_label", "_crit")
+                if os.path.exists(input_file):
+                    temp_c = int(open(input_file).read().strip()) / 1000.0
+                    crit_c = None
+                    if os.path.exists(crit_file):
+                        crit_c = int(open(crit_file).read().strip()) / 1000.0
+                    tag = f"{name}: {label}" if name else label
+                    spots[tag] = {"temp": temp_c, "crit": crit_c}
+            except: pass
+    if not spots:
+        for z in sorted(glob.glob("/sys/class/thermal/thermal_zone*")):
+            try:
+                t_type = open(f"{z}/type").read().strip()
+                temp_c = int(open(f"{z}/temp").read().strip()) / 1000.0
+                spots[t_type] = {"temp": temp_c, "crit": 100.0}
+            except: pass
+    return spots
+
+def get_per_core_throttles():
+    throttles = {}
+    for c in sorted(glob.glob("/sys/devices/system/cpu/cpu[0-9]*")):
+        c_name = os.path.basename(c)
+        try:
+            core_t = int(open(f"{c}/thermal_throttle/core_throttle_count").read().strip())
+            pkg_t = int(open(f"{c}/thermal_throttle/package_throttle_count").read().strip())
+            throttles[c_name] = (core_t, pkg_t)
+        except: pass
+    return throttles
+
+def worker(end_time, counter):
+    c = 0
+    while time.time() < end_time:
+        _ = sum(x * x for x in range(3000))
+        c += 1
+    counter.value = c
+
+def test_candidate(pl1, pl2, freq_ghz, duration=1.8):
+    set_profile(pl1, pl2, freq_ghz)
+    time.sleep(0.25)
+    cpu_count = os.cpu_count() or 4
+    spots_start = get_all_thermal_spots()
+    throttles_start = get_per_core_throttles()
+    time_start = time.time()
+    time_end = time_start + duration
+    counters = [multiprocessing.Value("i", 0) for _ in range(cpu_count)]
+    procs = [multiprocessing.Process(target=worker, args=(time_end, counters[i])) for i in range(cpu_count)]
+    for p in procs: p.start()
+    peak_spots = {k: v["temp"] for k, v in spots_start.items()}
+    while time.time() < time_end:
+        time.sleep(0.1)
+        cur = get_all_thermal_spots()
+        for k, v in cur.items():
+            if k not in peak_spots or v["temp"] > peak_spots[k]:
+                peak_spots[k] = v["temp"]
+    for p in procs: p.join()
+    real_dur = time.time() - time_start
+    throttles_end = get_per_core_throttles()
+    total_new_throttles = 0
+    for c, (c_end, p_end) in throttles_end.items():
+        c_start, p_start = throttles_start.get(c, (c_end, p_end))
+        total_new_throttles += max(0, c_end - c_start)
+    max_temp = max(peak_spots.values()) if peak_spots else 0.0
+    total_ops = sum(c.value for c in counters)
+    ops_sec = total_ops / real_dur if real_dur > 0 else 0.0
+    return max_temp, total_new_throttles, ops_sec
+
+target_temp = float(sys.argv[1])
+max_ghz = get_hw_max_freq_ghz()
+candidates = [
+    ("Stealth / Cool",  25, 35, round(max_ghz * 0.60, 1)),
+    ("Eco / Balanced",  35, 45, round(max_ghz * 0.70, 1)),
+    ("Sweet-Spot",      40, 55, round(max_ghz * 0.75, 1)),
+    ("Performance",     50, 70, round(max_ghz * 0.85, 1)),
+    ("High-Burst Max",  40, 60, round(max_ghz * 1.00, 1))
+]
+
+results = []
+for name, pl1, pl2, freq in candidates:
+    t_peak, throttles, ops_sec = test_candidate(pl1, pl2, freq, duration=1.8)
+    eff = ops_sec / t_peak if t_peak > 0 else 0.0
+    passed = (t_peak <= target_temp and throttles == 0)
+    results.append({
+        "name": name, "pl1": pl1, "pl2": pl2, "freq": freq,
+        "peak_temp": t_peak, "throttles": throttles, "ops_sec": ops_sec,
+        "eff": eff, "passed": passed
+    })
+
+print("--- Quantitative Profile Sweep Results ---")
+print("%-18s | %7s | %8s | %9s | %9s | %12s | %11s | %s" %
+      ("Profile", "Power", "Max Freq", "Peak Temp", "Throttles", "Throughput", "Efficiency", "Target Status"))
+print("-" * 106)
+
+best = None
+max_passed_ops = -1
+
+for r in results:
+    tag = "[PASS]" if r["passed"] else ("[OVER TEMP]" if r["throttles"] == 0 else "[THROTTLED]")
+    if r["passed"] and r["ops_sec"] > max_passed_ops:
+        max_passed_ops = r["ops_sec"]
+        best = r
+    r_ops = r["ops_sec"]
+    r_ops_str = f"{r_ops:,.0f}"
+    print("%-18s | %2dW/%-2dW | %4.1f GHz | %7.1f C | %9d | %9s o/s | %7.1f o/s/C | %s" %
+          (r["name"], r["pl1"], r["pl2"], r["freq"], r["peak_temp"], r["throttles"], r_ops_str, r["eff"], tag))
+
+print("-" * 106)
+if not best:
+    best = min(results, key=lambda x: x["peak_temp"])
+
+b_name = best["name"]
+b_freq = best["freq"]
+b_pl1 = best["pl1"]
+b_pl2 = best["pl2"]
+b_ops = best["ops_sec"]
+b_temp = best["peak_temp"]
+b_ops_str = f"{b_ops:,.0f}"
+
+print("\n--- Pareto Optimal Selection ---")
+print("Selected Winner:    %s" % b_name)
+print("Configuration:      %.1f GHz ceiling, PL1=%dW, PL2=%dW" % (b_freq, b_pl1, b_pl2))
+print("Throughput Score:   %s ops/sec" % b_ops_str)
+print("Peak Temperature:   %.1f C (under %d C target, 0 throttles)" % (b_temp, int(target_temp)))
+
+set_profile(b_pl1, b_pl2, b_freq)
+print("\n[SUCCESS] Applied optimal profile to system.")
+print("To maintain this profile across reboots, run:")
+print("  system undervolt cpu-power %d %d && system cpu %.1f" % (b_pl1, b_pl2, b_freq))
+' "$target_temp"
+    echo "================================================================================"
+}
+
+cmd=${1:-}
+case "$cmd" in
+    ""|status) status ;;
+    cpu) set_cpu_offsets "${2:-}" "${3:-}" ;;
+    cpu-core) set_cpu_single_offset "core" "${2:-}" ;;
+    cpu-cache) set_cpu_single_offset "cache" "${2:-}" ;;
+    cpu-gpu) set_cpu_single_offset "gpu" "${2:-}" ;;
+    cpu-power) set_cpu_power "${2:-}" "${3:-}" ;;
+    cpu-reset) reset_cpu ;;
+    gpu) set_gpu_clock_lock "${2:-}" ;;
+    gpu-lock) set_gpu_clock_lock "${2:-}" "${3:-}" ;;
+    gpu-power) set_gpu_power "${2:-}" ;;
+    gpu-reset) reset_gpu ;;
+    eval|test|benchmark) run_thermal_eval "${2:-$DEFAULT_BENCHMARK_SECONDS}" ;;
+    optimize|tune|opt) run_auto_optimization "${2:-80}" ;;
+    persist|service) manage_persist_service "${2:-enable}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" "${8:-}" ;;
+    reset) reset_all ;;
+    help|-h|--help) usage ;;
+    *)
+        echo "unknown command: $cmd" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

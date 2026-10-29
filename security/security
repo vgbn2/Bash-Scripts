@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Main entry point for homelab security auditing, reconnaissance, and pentest tools.
+
+set -u
+
+SECURITY_ENTRY="$(readlink -f -- "${BASH_SOURCE[0]}")"
+SECURITY_DIR="$(cd -- "$(dirname -- "$SECURITY_ENTRY")" && pwd)"
+TOOL_ROOT="$(cd -- "$SECURITY_DIR/.." && pwd)"
+LIB_DIR="$SECURITY_DIR/security-lib"
+
+source "$LIB_DIR/common.sh"
+source "$LIB_DIR/audit.sh"
+source "$LIB_DIR/network.sh"
+source "$LIB_DIR/capacity.sh"
+source "$LIB_DIR/kali.sh"
+source "$LIB_DIR/cheatsheet.sh"
+source "$LIB_DIR/main.sh"

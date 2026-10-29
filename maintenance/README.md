@@ -21,6 +21,7 @@ system repair suggest
 system repair thermal --yes
 system repair gpu --yes
 system repair desktop --yes
+system repair shutdown --yes
 ```
 
 Every state-changing repair requires confirmation at the canonical

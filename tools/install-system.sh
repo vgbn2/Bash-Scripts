@@ -44,6 +44,7 @@ OPTIONAL_PACKAGES=(
     joystick
     libinput-tools
     mokutil
+    msr-tools
     nethogs
     network-manager
     sysstat
@@ -54,10 +55,12 @@ OPTIONAL_PACKAGES=(
 COMMAND_LINKS=(
     "system:system/system"
     "cpu:hardware/cpu"
+    "undervolt:hardware/undervolt"
     "system-health:maintenance/system-health"
     "system-repair:maintenance/system-repair"
     "gaming:gaming/gaming"
     "ai:ai/ai"
+    "security:security/security"
 )
 
 usage() {
@@ -242,8 +245,8 @@ install_links() {
             continue
         fi
         if [ -e "$destination" ] && [ ! -L "$destination" ]; then
-            echo "Refusing to overwrite regular file: $destination" >&2
-            return 1
+            echo "Skipping regular file (not overwriting): $destination" >&2
+            continue
         fi
 
         ln -sfn -- "$source" "$destination"

@@ -261,7 +261,9 @@ test_system_action_guards() {
     expect_status 2 "$TOOL_ROOT/system/system" repair thermal
     expect_status 2 "$TOOL_ROOT/system/system" repair gpu
     expect_status 2 "$TOOL_ROOT/system/system" repair desktop
+    expect_status 2 "$TOOL_ROOT/system/system" repair shutdown
     expect_status 2 "$TOOL_ROOT/maintenance/system-repair" gpu
+    expect_status 2 "$TOOL_ROOT/maintenance/system-repair" shutdown
     expect_status 2 "$TOOL_ROOT/system/system" network limit-download
     expect_status 2 "$TOOL_ROOT/system/system" network limit-download 50
     expect_status 1 "$TOOL_ROOT/system/system" network limit-download 50 100 invalid_iface_999
@@ -323,10 +325,84 @@ test_mirror_guards() {
         fail "mirror apply changed protected Codex metadata"
 }
 
+test_nvme_formatting() {
+    # ponytail: verify nvme unit parsing, TB scaling (1 unit = 512KB, 1TB = 10^12B), and command count formatting
+    source "$TOOL_ROOT/system/system-lib/header.sh"
+    source "$TOOL_ROOT/system/system-lib/health.sh"
+
+    # 1. Modern nvme-cli formatted with parenthetical TB: "20945251 (10.72 TB)"
+    # Expected: 20945251 * 512 * 1000 / 10^12 = 10.7239... -> 10.72 TB
+    local test_units=20945251
+    local expected_tb
+    expected_tb=$(awk -v u="$test_units" 'BEGIN { printf "%.2f TB", (u * 512 * 1000) / 10^12 }')
+    [ "$(nvme_data_units_to_tb "${test_units} (${expected_tb})")" = "$expected_tb" ] || fail "nvme modern parenthetical TB calculation failed"
+    [ "$(nvme_data_units_to_tb "${test_units}")" = "$expected_tb" ] || fail "nvme raw units calculation failed"
+
+    # 2. smartctl bracketed format with commas: "20,945,251 [10.7 TB]"
+    [ "$(nvme_data_units_to_tb "20,945,251 [10.7 TB]")" = "$expected_tb" ] || fail "smartctl format parsing failed"
+
+    # 3. Fallback and invalid inputs
+    [ "$(nvme_data_units_to_tb "")" = "unavailable" ] || fail "empty data units fallback failed"
+    [ "$(nvme_data_units_to_tb "invalid")" = "unavailable" ] || fail "invalid data units fallback failed"
+
+    # 4. Command counts: scaled by 10^6 (M) and 10^9 (B)
+    [ "$(format_command_count "218173252")" = "218,173,252 (218.17M)" ] || fail "command count M formatting failed"
+    [ "$(format_command_count "2116085850")" = "2,116,085,850 (2.12B)" ] || fail "command count B formatting failed"
+    [ "$(format_command_count "")" = "unavailable" ] || fail "empty command count fallback failed"
+}
+
+test_undervolt_guards() {
+    # ponytail: verify parameter validation and guardrails on CPU/GPU undervolt tool
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" cpu
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" cpu invalid
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" cpu -300
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" cpu-power
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" cpu-power invalid
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" gpu 100
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" gpu 3000
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" gpu-power 0
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" gpu-power 150
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" eval invalid
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" eval 1
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" eval 100
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" optimize 50
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" optimize 110
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" optimize invalid
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" profile
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" profile invalid
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" calculus invalid
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" calculus 2 50
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" calculus 50 20
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" persist invalid
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" service invalid
+    expect_status 0 "$TOOL_ROOT/hardware/undervolt" persist unit
+    local unit_out
+    unit_out=$("$TOOL_ROOT/hardware/undervolt" persist unit)
+    echo "$unit_out" | grep -q "\[Unit\]" || fail "persist unit missing [Unit]"
+    echo "$unit_out" | grep -q "ExecStart=.*undervolt.*--core -60 --cache -60 -p1 28 28 -p2 35 0.0024" || fail "persist unit missing undervolt parameters"
+    echo "$unit_out" | grep -q "3200000" || fail "persist unit missing 3200000"
+    echo "$unit_out" | grep -q "nvidia-smi -lgc 210,1600" || fail "persist unit missing nvidia-smi lock"
+    expect_status 2 "$TOOL_ROOT/hardware/undervolt" invalid_action
+    expect_status 0 "$TOOL_ROOT/hardware/undervolt" help
+    expect_status 0 "$TOOL_ROOT/system/system" undervolt help
+}
+
+test_register_inspector_guards() {
+    # ponytail: verify hardware register inspector CLI guardrails and unit test suite
+    expect_status 2 "$TOOL_ROOT/hardware/hardware-register-inspector.sh" invalid_action
+    expect_status 2 "$TOOL_ROOT/hardware/hardware-register-inspector.sh" unknown_subcommand
+    expect_status 0 "$TOOL_ROOT/hardware/hardware-register-inspector.sh" help
+    expect_status 0 "$TOOL_ROOT/system/system" registers help
+    "$TOOL_ROOT/tests/test_hardware_register_inspector.sh" >/dev/null
+}
+
 test_archive_guards
 test_gpu_truthful_status
 test_thermal_selection
 test_system_action_guards
 test_gaming_repair_propagation
 test_mirror_guards
+test_nvme_formatting
+test_undervolt_guards
+test_register_inspector_guards
 echo "Safety checks passed."

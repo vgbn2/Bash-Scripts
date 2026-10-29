@@ -10,6 +10,7 @@ commands:
   thermal --yes    apply balanced thermal policy
   gpu --yes        refresh Flatpak NVIDIA runtime and stop stale game launchers
   desktop --yes    restart accounts-daemon and gdm
+  shutdown --yes   set systemd stop timeout to 10s to prevent long hangs on poweroff
 
 Notes:
   - This script is manual. It is not used by the weekly health timer.
@@ -83,6 +84,18 @@ suggest() {
     if ! systemctl is-active --quiet accounts-daemon.service 2>/dev/null; then
         echo "recommend: system-repair desktop --yes"
     fi
+
+    echo
+    echo "## Shutdown"
+    local sys_timeout user_timeout
+    sys_timeout=$(grep -E '^[# ]*DefaultTimeoutStopSec=' /etc/systemd/system.conf 2>/dev/null | tail -n1 || true)
+    user_timeout=$(grep -E '^[# ]*DefaultTimeoutStopSec=' /etc/systemd/user.conf 2>/dev/null | tail -n1 || true)
+    if [[ "$sys_timeout" =~ ^DefaultTimeoutStopSec=10s ]] && [[ "$user_timeout" =~ ^DefaultTimeoutStopSec=10s ]]; then
+        echo "shutdown_stop_timeout=10s (ok)"
+    else
+        echo "shutdown_stop_timeout=default (90s)"
+        echo "recommend: system-repair shutdown --yes"
+    fi
 }
 
 thermal() {
@@ -130,6 +143,13 @@ WARN
     systemctl status accounts-daemon.service gdm.service --no-pager
 }
 
+shutdown_timeout() {
+    echo "Setting systemd shutdown stop timeout to 10s..."
+    sudo sed -i 's/^#*DefaultTimeoutStopSec=.*/DefaultTimeoutStopSec=10s/' /etc/systemd/system.conf /etc/systemd/user.conf
+    sudo systemctl daemon-reload
+    echo "Shutdown stop timeout configured to 10s."
+}
+
 case "${1:-}" in
     suggest) suggest ;;
     thermal)
@@ -143,6 +163,10 @@ case "${1:-}" in
     desktop)
         require_confirmation desktop "${2:-}"
         desktop
+        ;;
+    shutdown)
+        require_confirmation shutdown "${2:-}"
+        shutdown_timeout
         ;;
     -h|--help|help|"") usage ;;
     *) echo "unknown command: $1" >&2; usage >&2; exit 2 ;;

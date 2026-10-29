@@ -36,7 +36,7 @@ fi
 SYSTEM_INSTALL_BIN_DIR="$TEMP_DIR/bin" \
     "$TOOL_ROOT/tools/install-system.sh" links --yes >/dev/null
 
-for command_name in system cpu system-health system-repair gaming ai; do
+for command_name in system cpu undervolt system-health system-repair gaming ai security; do
     test -L "$TEMP_DIR/bin/$command_name"
     test -x "$TEMP_DIR/bin/$command_name"
 done

@@ -1,5 +1,10 @@
 # Command routing. This file runs after all feature files are loaded.
 
+area=${1:-}
+action=${2:-}
+arg3=${3:-}
+arg4=${4:-}
+
 show_full_status() {
     show_cpu_status
     show_ram_status
@@ -28,7 +33,7 @@ run_cpu() {
     elif [[ "$action" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
         delegate_tool "hardware/cpu" "$action"
     else
-        delegate_tool "hardware/cpu" "$action" "${3:-}"
+        delegate_tool "hardware/cpu" "$action" "$arg3"
     fi
 }
 
@@ -44,7 +49,7 @@ run_repair() {
     if [ -z "$action" ]; then
         delegate_tool "maintenance/system-repair" help
     else
-        delegate_tool "maintenance/system-repair" "$action" "${3:-}"
+        delegate_tool "maintenance/system-repair" "$action" "$arg3"
     fi
 }
 
@@ -70,7 +75,7 @@ run_archive() {
             ;;
         archive|cleanup|all)
             delegate_tool "maintenance/archive_screenshots.sh" \
-                "$action" "${3:-}"
+                "$action" "$arg3"
             ;;
         *)
             echo "Usage: system archive [preview|archive --yes|cleanup --yes|all --yes]" >&2
@@ -88,10 +93,10 @@ run_setup() {
             delegate_tool "tools/install-system.sh" status
             ;;
         links)
-            delegate_tool "tools/install-system.sh" links "${3:-}"
+            delegate_tool "tools/install-system.sh" links "$arg3"
             ;;
         core|all)
-            delegate_tool "tools/install-system.sh" packages "$action" "${3:-}"
+            delegate_tool "tools/install-system.sh" packages "$action" "$arg3"
             ;;
         *)
             echo "Usage: system setup [status|links --yes|core --yes|all --yes]" >&2
@@ -99,9 +104,6 @@ run_setup() {
             ;;
     esac
 }
-
-area=${1:-}
-action=${2:-}
 
 case "$area" in
     "")
@@ -141,21 +143,21 @@ case "$area" in
         if [ -z "$action" ]; then
             enter_section ai
         else
-            delegate_tool "ai/ai" "$action" "${3:-}"
+            delegate_tool "ai/ai" "${@:2}"
         fi
         ;;
     gaming)
         if [ -z "$action" ]; then
             enter_section gaming
         else
-            delegate_tool "gaming/gaming" "$action" "${3:-}"
+            delegate_tool "gaming/gaming" "${@:2}"
         fi
         ;;
     games)
         if [ -z "$action" ]; then
             enter_section games
         else
-            delegate_tool "gaming/gaming" "$action" "${3:-}"
+            delegate_tool "gaming/gaming" "${@:2}"
         fi
         ;;
     ram)
@@ -168,8 +170,18 @@ case "$area" in
         case "$action" in
             status) show_gpu_status ;;
             health) delegate_tool "hardware/check_gpu.sh" ;;
+            undervolt|lock) delegate_tool "hardware/undervolt" gpu "$arg3" ;;
+            power) delegate_tool "hardware/undervolt" gpu-power "$arg3" ;;
+            reset) delegate_tool "hardware/undervolt" gpu-reset ;;
             *) show_help ;;
         esac
+        ;;
+    undervolt)
+        if [ -z "$action" ]; then
+            delegate_tool "hardware/undervolt" status
+        else
+            delegate_tool "hardware/undervolt" "$action" "$arg3" "$arg4"
+        fi
         ;;
     thermals)
         case "$action" in
@@ -328,7 +340,14 @@ case "$area" in
         esac
         ;;
     hardware)
-        [ "$action" = "summary" ] && show_hardware_summary || show_help
+        case "$action" in
+            summary) show_hardware_summary ;;
+            registers|inspector) delegate_tool "hardware/hardware-register-inspector.sh" "$arg3" "$arg4" ;;
+            *) show_help ;;
+        esac
+        ;;
+    registers|inspector)
+        delegate_tool "hardware/hardware-register-inspector.sh" "$action" "$arg3" "$arg4"
         ;;
     devices)
         [ -z "$action" ] && show_devices || show_help
@@ -391,6 +410,13 @@ case "$area" in
         ;;
     desktop)
         run_desktop
+        ;;
+    security|pentest|cybersec)
+        if [ -z "$action" ]; then
+            enter_section security
+        else
+            delegate_tool "security/security" "${@:2}"
+        fi
         ;;
     *)
         printf 'Unknown system section: %s\n\n' "$area" >&2

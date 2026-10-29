@@ -4,7 +4,9 @@
 
 set -u
 
-STEAM_ROOT="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+STEAM_ROOT="$HOME/.local/share/Steam"
+[ -d "$STEAM_ROOT" ] || STEAM_ROOT="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
 
 show_help() {
     cat <<'HELP'
@@ -12,8 +14,11 @@ Usage: system games <command>
 Compatibility alias: gaming <command>
 
 CHECKS (read-only)
+  system games doctor
+      Comprehensive graphics driver, Vulkan ICDs, 32/64-bit multiarch, GameMode, and Proton diagnostics.
+
   system games status
-      Show NVIDIA, Vulkan, Steam Flatpak, and Flatpak-runtime status.
+      Show NVIDIA, Vulkan, Steam, and runtime status.
 
   system games steam
       List installed Steam games. Alias: system games games.
@@ -31,7 +36,17 @@ CHECKS (read-only)
       Summarize whether each installed game has a Proton prefix.
 
   system games diagnose
-      Run graphics and llvmpipe diagnostics.
+      Run full graphics, Vulkan, and Proton stack diagnostics.
+
+FRAME GENERATION & SCALING
+  system games lossless [start|stop|status|detect|engage|tune|profile]
+      Control Lossless Scaling LSFG 3.0 adaptive frame generation.
+
+  system games fg [2x|3x|4x] [fps]
+      Quick-switch between 2x, 3x, or 4x frame generation profiles.
+
+  system games framegen <witcher|rome|<cmd>> [fps]
+      Launch any game with P-core pinning and adaptive frame generation.
 
 REPAIRS (explicit, changes state)
   system games repair-flatpak-gpu --yes
@@ -358,8 +373,70 @@ case "$command_name" in
     compatibility)
         show_compatibility_summary
         ;;
+    doctor|check-drivers|drivers)
+        "$SCRIPT_DIR/gaming-doctor" "${@:2}"
+        ;;
     diagnose)
-        show_diagnosis
+        "$SCRIPT_DIR/gaming-doctor" "${@:2}"
+        ;;
+    lossless|lsfg)
+        if [ -x "$SCRIPT_DIR/lossless-scaling.sh" ]; then
+            "$SCRIPT_DIR/lossless-scaling.sh" "${@:2}"
+        else
+            echo "Lossless Scaling controller not found at: $SCRIPT_DIR/lossless-scaling.sh" >&2
+            exit 1
+        fi
+        ;;
+    fg)
+        if [ -x "$SCRIPT_DIR/lossless-scaling.sh" ]; then
+            "$SCRIPT_DIR/lossless-scaling.sh" profile "${@:2}"
+        else
+            echo "Lossless Scaling controller not found at: $SCRIPT_DIR/lossless-scaling.sh" >&2
+            exit 1
+        fi
+        ;;
+    framegen)
+        case "${2:-}" in
+            witcher|witcher3|tw3)
+                if [ -x "$SCRIPT_DIR/witcher3-framegen.sh" ]; then
+                    case "${3:-launch}" in
+                        launch|start)
+                            "$SCRIPT_DIR/witcher3-framegen.sh" launch "${4:-120}" "${5:-60}"
+                            ;;
+                        status|optimize|tune|config|detect|engage|help)
+                            "$SCRIPT_DIR/witcher3-framegen.sh" "$3" "${@:4}"
+                            ;;
+                        [0-9]*)
+                            "$SCRIPT_DIR/witcher3-framegen.sh" launch "$3" "${4:-60}"
+                            ;;
+                        *)
+                            "$SCRIPT_DIR/witcher3-framegen.sh" launch "${3:-120}" "${4:-60}"
+                            ;;
+                    esac
+                else
+                    echo "Witcher 3 framegen launcher not found at: $SCRIPT_DIR/witcher3-framegen.sh" >&2
+                    exit 1
+                fi
+                ;;
+            rome|rtw|totalwar)
+                if [ -x "$SCRIPT_DIR/rome-total-framegen.sh" ]; then
+                    "$SCRIPT_DIR/rome-total-framegen.sh" "${3:-100}"
+                else
+                    echo "Rome framegen launcher not found at: $SCRIPT_DIR/rome-total-framegen.sh" >&2
+                    exit 1
+                fi
+                ;;
+            *)
+                if [ -n "${2:-}" ]; then
+                    if [ -x "$SCRIPT_DIR/lossless-scaling.sh" ]; then
+                        "$SCRIPT_DIR/lossless-scaling.sh" run "${@:2}"
+                    fi
+                else
+                    echo "Usage: system games framegen <rome|<game_cmd>> [target_fps]" >&2
+                    exit 2
+                fi
+                ;;
+        esac
         ;;
     repair-flatpak-gpu)
         repair_flatpak_gpu "${2:-}"

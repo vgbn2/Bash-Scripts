@@ -1,0 +1,16 @@
+[Unit]
+Description=Hardware Optimization Service (CPU Undervolt, Power Caps, Freq Ceiling, GPU Clock Lock)
+After=multi-user.target suspend.target hibernate.target hybrid-sleep.target
+Wants=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStartPre=-/usr/sbin/modprobe msr
+ExecStart=/usr/local/bin/undervolt --core -60 --cache -60 -p1 28 28 -p2 35 0.0024
+ExecStart=/bin/bash -c 'for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do [ -w "$f" ] && echo 3200000 > "$f"; done'
+ExecStart=-/usr/bin/nvidia-smi -lgc 210,1600
+
+[Install]
+WantedBy=multi-user.target suspend.target hibernate.target hybrid-sleep.target

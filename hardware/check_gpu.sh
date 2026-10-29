@@ -32,7 +32,8 @@ notify() {
     local urgency=$1 title=$2 message=$3
 
     command -v notify-send >/dev/null 2>&1 || return
-    notify-send -u "$urgency" "$title" "$message" 2>/dev/null || true
+    local n_rc=0
+    notify-send -u "$urgency" "$title" "$message" 2>/dev/null || n_rc=$?
 }
 
 mark_warning() {
@@ -84,7 +85,7 @@ check_nvidia_telemetry() {
 }
 
 check_vulkan() {
-    local summary renderer
+    local summary renderers hw_renderers hw_list hw_rc=0
 
     if ! command -v vulkaninfo >/dev/null 2>&1; then
         log "WARNING: vulkaninfo is unavailable; Vulkan check skipped."
@@ -97,17 +98,25 @@ check_vulkan() {
         mark_warning
         return
     fi
-    renderer=$(printf '%s\n' "$summary" |
-        awk -F '=' '/deviceName/ {sub(/^[[:space:]]+/, "", $2); print $2; exit}')
-    if printf '%s\n' "$summary" | grep -qi 'llvmpipe'; then
+
+    # ponytail: parse deviceName fields; upgrade to json parser if vulkaninfo schema changes
+    renderers=$(printf '%s\n' "$summary" |
+        awk -F '=' '/deviceName/ {sub(/^[[:space:]]+/, "", $2); sub(/[[:space:]]+$/, "", $2); print $2}')
+    hw_renderers=$(printf '%s\n' "$renderers" | grep -viE 'llvmpipe|lavapipe|software rasterizer') || hw_rc=$?
+
+    if [ -n "$hw_renderers" ]; then
+        hw_list=$(printf '%s\n' "$hw_renderers" | paste -sd, - | sed 's/,/, /g')
+        log "Vulkan renderer: $hw_list"
+    elif printf '%s\n' "$summary" | grep -qi 'llvmpipe'; then
         log "CRITICAL: Vulkan reports llvmpipe CPU software rendering."
         notify critical "GPU critical" "Vulkan reports llvmpipe software rendering."
         mark_critical
-    elif [ -z "$renderer" ]; then
+    elif [ -z "$renderers" ]; then
         log "WARNING: Vulkan renderer was not present in the summary."
         mark_warning
     else
-        log "Vulkan renderer: $renderer"
+        log "WARNING: No hardware Vulkan renderer detected."
+        mark_warning
     fi
 }
 
