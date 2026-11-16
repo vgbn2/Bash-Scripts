@@ -1,26 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CPU_MIN_GHZ=2.4
-CPU_MAX_GHZ=4.4
-PROFILE_PATH=/sys/firmware/acpi/platform_profile
-PROFILE_CHOICES_PATH=/sys/firmware/acpi/platform_profile_choices
-TURBO_PATH=/sys/devices/system/cpu/intel_pstate/no_turbo
+SYSFS_CPU_DIR="${SYSFS_CPU_DIR:-/sys/devices/system/cpu}"
+PROFILE_PATH="${PROFILE_PATH:-/sys/firmware/acpi/platform_profile}"
+PROFILE_CHOICES_PATH="${PROFILE_CHOICES_PATH:-/sys/firmware/acpi/platform_profile_choices}"
+TURBO_PATH="${TURBO_PATH:-}"
+
+discover_bounds() {
+    local min_k="" max_k=""
+    if [ -r "${SYSFS_CPU_DIR}/cpu0/cpufreq/cpuinfo_min_freq" ]; then
+        min_k=$(cat "${SYSFS_CPU_DIR}/cpu0/cpufreq/cpuinfo_min_freq")
+    elif [ -r "${SYSFS_CPU_DIR}/cpufreq/policy0/cpuinfo_min_freq" ]; then
+        min_k=$(cat "${SYSFS_CPU_DIR}/cpufreq/policy0/cpuinfo_min_freq")
+    fi
+
+    if [ -r "${SYSFS_CPU_DIR}/cpu0/cpufreq/cpuinfo_max_freq" ]; then
+        max_k=$(cat "${SYSFS_CPU_DIR}/cpu0/cpufreq/cpuinfo_max_freq")
+    elif [ -r "${SYSFS_CPU_DIR}/cpufreq/policy0/cpuinfo_max_freq" ]; then
+        max_k=$(cat "${SYSFS_CPU_DIR}/cpufreq/policy0/cpuinfo_max_freq")
+    fi
+
+    CPU_MIN_GHZ=$(awk -v k="$min_k" 'BEGIN { if (k ~ /^[0-9]+$/ && k > 0) printf "%.1f", k / 1000000; else printf "0.8"; }')
+    CPU_MAX_GHZ=$(awk -v k="$max_k" 'BEGIN { if (k ~ /^[0-9]+$/ && k > 0) printf "%.1f", k / 1000000; else printf "5.0"; }')
+}
+
+discover_bounds
 
 usage() {
-    cat <<'USAGE'
+    cat <<USAGE
 usage: cpu <command> [value]
 
 commands:
   status              show profile, CPU cap, current frequency, turbo, temp
-  <GHz>               set CPU max frequency, e.g. cpu 3.3
+  <GHz>               set CPU max frequency (supported: ${CPU_MIN_GHZ}-${CPU_MAX_GHZ} GHz)
   recommend           pick a CPU cap from current temp/load
-  cool                low-power profile + 2.6 GHz + turbo off
+  cool                low-power profile + min GHz + turbo off
   balanced            balanced profile + recommended CPU cap
-  game                max-power profile + 4.0 GHz + turbo on
-  full                performance profile + 4.4 GHz + turbo on
-  profile <name>      set platform profile: low-power/balanced/performance/max-power/custom
-  turbo on|off        enable or disable turbo
+  game                performance profile + turbo on + high clock
+  full                performance profile + max GHz + turbo on
+  profile <name>      set platform profile
+  turbo on|off        enable or disable turbo boost
   undervolt [mV]      show or set CPU undervolt offset
 USAGE
 }
@@ -31,7 +50,11 @@ need_sudo_write() {
         echo "missing: $path" >&2
         return 1
     fi
-    printf '%s\n' "$value" | sudo tee "$path" >/dev/null
+    if [ -w "$path" ]; then
+        printf '%s\n' "$value" > "$path"
+    else
+        printf '%s\n' "$value" | sudo tee "$path" >/dev/null
+    fi
 }
 
 cpu_temp_c() {
@@ -39,7 +62,7 @@ cpu_temp_c() {
 }
 
 load_1m() {
-    awk '{printf "%.1f", $1}' /proc/loadavg
+    awk '{printf "%.1f", $1}' /proc/loadavg 2>/dev/null || echo "0.0"
 }
 
 set_cpu() {
@@ -49,14 +72,39 @@ set_cpu() {
     khz=$(awk -v v="$input" -v min="$CPU_MIN_GHZ" -v max="$CPU_MAX_GHZ" 'BEGIN {
         if (v !~ /^[0-9]+([.][0-9]+)?$/) exit 2;
         if (v > 100) v = v / 1000;
-        if (v <= min || v > max) exit 3;
+        if (v < min || v > max) exit 3;
         printf "%d", v * 1000000;
     }') || {
-        echo "cpu: use a value > ${CPU_MIN_GHZ} and <= ${CPU_MAX_GHZ} GHz, example: cpu 3.3" >&2
+        echo "cpu: use a value >= ${CPU_MIN_GHZ} and <= ${CPU_MAX_GHZ} GHz, example: cpu 3.3" >&2
         return 2
     }
 
-    sudo bash -c 'for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo "$1" > "$f"; done' _ "$khz"
+    local cpufreq_files
+    shopt -s nullglob
+    cpufreq_files=("${SYSFS_CPU_DIR}"/cpu*/cpufreq/scaling_max_freq)
+    shopt -u nullglob
+
+    if [ ${#cpufreq_files[@]} -eq 0 ]; then
+        echo "cpu: CPU frequency scaling is not supported on this system" >&2
+        return 1
+    fi
+
+    local write_failed=0
+    for f in "${cpufreq_files[@]}"; do
+        if [ -w "$f" ]; then
+            printf '%s\n' "$khz" > "$f" 2>/dev/null || write_failed=1
+        elif command -v sudo >/dev/null 2>&1; then
+            sudo bash -c 'printf "%s\n" "$1" > "$2"' _ "$khz" "$f" 2>/dev/null || write_failed=1
+        else
+            write_failed=1
+        fi
+    done
+
+    if [ "$write_failed" -eq 1 ]; then
+        echo "cpu: failed to set frequency ceiling to ${input} GHz" >&2
+        return 1
+    fi
+
     echo "CPU max frequency set to ${input} GHz"
 }
 
@@ -80,12 +128,55 @@ set_profile() {
     esac
 }
 
+get_turbo_path_and_values() {
+    # returns: path on_val off_val
+    if [ -n "${TURBO_PATH:-}" ] && [ -e "$TURBO_PATH" ]; then
+        echo "$TURBO_PATH" 0 1
+    elif [ -e "${SYSFS_CPU_DIR}/intel_pstate/no_turbo" ]; then
+        echo "${SYSFS_CPU_DIR}/intel_pstate/no_turbo" 0 1
+    elif [ -e "${SYSFS_CPU_DIR}/cpufreq/boost" ]; then
+        echo "${SYSFS_CPU_DIR}/cpufreq/boost" 1 0
+    else
+        return 1
+    fi
+}
+
+get_turbo_state() {
+    local t_info
+    if t_info=$(get_turbo_path_and_values); then
+        local t_path on_v off_v cur_v
+        read -r t_path on_v off_v <<< "$t_info"
+        cur_v=$(cat "$t_path" 2>/dev/null || echo "")
+        if [ "$cur_v" = "$on_v" ]; then
+            echo "on"
+        elif [ "$cur_v" = "$off_v" ]; then
+            echo "off"
+        else
+            echo "unknown"
+        fi
+    else
+        echo "unsupported"
+    fi
+}
+
 set_turbo() {
-    case "${1:-}" in
-        on) need_sudo_write "$TURBO_PATH" 0; echo "turbo enabled" ;;
-        off) need_sudo_write "$TURBO_PATH" 1; echo "turbo disabled" ;;
+    local action=${1:-}
+    local t_info
+    if ! t_info=$(get_turbo_path_and_values); then
+        echo "cpu: turbo control is not supported on this CPU / governor" >&2
+        return 1
+    fi
+
+    local t_path on_v off_v write_v
+    read -r t_path on_v off_v <<< "$t_info"
+    case "$action" in
+        on) write_v="$on_v" ;;
+        off) write_v="$off_v" ;;
         *) echo "usage: cpu turbo on|off" >&2; return 2 ;;
     esac
+
+    need_sudo_write "$t_path" "$write_v"
+    echo "turbo ${action}"
 }
 
 recommend_cpu() {
@@ -110,25 +201,35 @@ recommend_cpu() {
         target=3.3
     fi
 
+    # ponytail: clamp target recommendation within discovered hardware limits
+    target=$(awk -v t="$target" -v min="$CPU_MIN_GHZ" -v max="$CPU_MAX_GHZ" 'BEGIN {
+        if (t < min) t = min;
+        if (t > max) t = max;
+        printf "%.1f", t;
+    }')
+
     echo "temp=${temp}C load=${load} -> cpu ${target}"
     set_cpu "$target"
 }
 
 status() {
-    local profile turbo temp
-    profile=$(cat "$PROFILE_PATH" 2>/dev/null || true)
-    turbo=$(cat "$TURBO_PATH" 2>/dev/null || true)
+    local profile="unknown" turbo temp
+    if [ -r "$PROFILE_PATH" ]; then
+        profile=$(cat "$PROFILE_PATH")
+    fi
+    turbo=$(get_turbo_state)
     temp=$(cpu_temp_c)
 
     printf 'profile=%s\n' "${profile:-unknown}"
-    printf 'turbo=%s\n' "$([ "$turbo" = 0 ] && echo on || echo off)"
+    printf 'turbo=%s\n' "$turbo"
     printf 'temp=%sC\n' "${temp:-unknown}"
     printf 'load=%s\n' "$(load_1m)"
-    printf 'cpu_max_khz=%s\n' "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2>/dev/null || echo unknown)"
-    printf 'cpu_cur_khz=%s\n' "$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null || echo unknown)"
+    printf 'cpu_bounds_ghz=%s-%s\n' "$CPU_MIN_GHZ" "$CPU_MAX_GHZ"
+    printf 'cpu_max_khz=%s\n' "$(cat "${SYSFS_CPU_DIR}/cpu0/cpufreq/scaling_max_freq" 2>/dev/null || echo unknown)"
+    printf 'cpu_cur_khz=%s\n' "$(cat "${SYSFS_CPU_DIR}/cpu0/cpufreq/scaling_cur_freq" 2>/dev/null || echo unknown)"
     if command -v undervolt >/dev/null 2>&1; then
-        local uv_core
-        uv_core=$(sudo undervolt --read 2>/dev/null | awk '/^core:/ {print $2, $3}' || true)
+        local uv_core=""
+        uv_core=$(sudo undervolt --read 2>/dev/null | awk '/^core:/ {print $2, $3}') || uv_core=""
         [ -n "$uv_core" ] && printf 'undervolt_core=%s\n' "$uv_core"
     fi
 }
@@ -147,23 +248,42 @@ case "$cmd" in
         ;;
     recommend) recommend_cpu ;;
     cool)
-        set_profile low-power
-        set_turbo off
-        set_cpu 2.6
+        if [ -r "$PROFILE_CHOICES_PATH" ] && grep -qw "low-power" "$PROFILE_CHOICES_PATH"; then
+            set_profile low-power
+        fi
+        if get_turbo_path_and_values >/dev/null 2>&1; then
+            set_turbo off
+        fi
+        set_cpu "$CPU_MIN_GHZ"
         ;;
     balanced)
-        set_profile balanced
+        if [ -r "$PROFILE_CHOICES_PATH" ] && grep -qw "balanced" "$PROFILE_CHOICES_PATH"; then
+            set_profile balanced
+        fi
         recommend_cpu
         ;;
     game)
-        set_profile max-power
-        set_turbo on
-        set_cpu 4.0
+        if [ -r "$PROFILE_CHOICES_PATH" ]; then
+            if grep -qw "max-power" "$PROFILE_CHOICES_PATH"; then
+                set_profile max-power
+            elif grep -qw "performance" "$PROFILE_CHOICES_PATH"; then
+                set_profile performance
+            fi
+        fi
+        if get_turbo_path_and_values >/dev/null 2>&1; then
+            set_turbo on
+        fi
+        target_game=$(awk -v max="$CPU_MAX_GHZ" 'BEGIN { t = 4.0; if (t > max) t = max; printf "%.1f", t; }')
+        set_cpu "$target_game"
         ;;
     full)
-        set_profile performance
-        set_turbo on
-        set_cpu 4.4
+        if [ -r "$PROFILE_CHOICES_PATH" ] && grep -qw "performance" "$PROFILE_CHOICES_PATH"; then
+            set_profile performance
+        fi
+        if get_turbo_path_and_values >/dev/null 2>&1; then
+            set_turbo on
+        fi
+        set_cpu "$CPU_MAX_GHZ"
         ;;
     profile) set_profile "${2:-}" ;;
     turbo) set_turbo "${2:-}" ;;

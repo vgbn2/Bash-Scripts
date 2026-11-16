@@ -311,13 +311,25 @@ reset_all() {
 
 # ponytail: generate systemd oneshot service unit for hardware optimization
 generate_service_content() {
-    local uv_core=${1:--60}
-    local uv_cache=${2:--60}
-    local pl1=${3:-28}
-    local pl2=${4:-35}
-    local max_freq_khz=${5:-3200000}
-    local gpu_min=${6:-210}
-    local gpu_max=${7:-1600}
+    local uv_core uv_cache pl1 pl2 max_freq_khz gpu_min gpu_max
+    if [ $# -eq 0 ]; then
+        # Default template unit for preview matching hardware-optimization.service
+        uv_core=-60
+        uv_cache=-60
+        pl1=28
+        pl2=35
+        max_freq_khz=3200000
+        gpu_min=210
+        gpu_max=1600
+    else
+        uv_core=${1:-}
+        uv_cache=${2:-}
+        pl1=${3:-}
+        pl2=${4:-}
+        max_freq_khz=${5:-}
+        gpu_min=${6:-}
+        gpu_max=${7:-}
+    fi
 
     local undervolt_bin="/usr/local/bin/undervolt"
     if [ ! -x "$undervolt_bin" ]; then
@@ -344,8 +356,18 @@ RemainAfterExit=yes
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 ExecStartPre=-${modprobe_bin} msr
 ExecStart=${undervolt_bin} --core ${uv_core} --cache ${uv_cache} -p1 ${pl1} 28 -p2 ${pl2} 0.0024
+EOF
+    if [ -n "$max_freq_khz" ]; then
+        cat <<EOF
 ExecStart=/bin/bash -c 'for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do [ -w "\$f" ] && echo ${max_freq_khz} > "\$f"; done'
+EOF
+    fi
+    if [ -n "$gpu_min" ] && [ -n "$gpu_max" ]; then
+        cat <<EOF
 ExecStart=-${nvidia_bin} -lgc ${gpu_min},${gpu_max}
+EOF
+    fi
+    cat <<EOF
 
 [Install]
 WantedBy=multi-user.target suspend.target hibernate.target hybrid-sleep.target
@@ -353,13 +375,18 @@ EOF
 }
 
 apply_hardware_optimizations() {
-    local uv_core=${1:--60}
-    local uv_cache=${2:--60}
-    local pl1=${3:-28}
-    local pl2=${4:-35}
-    local max_freq_khz=${5:-3200000}
-    local gpu_min=${6:-210}
-    local gpu_max=${7:-1600}
+    local uv_core=${1:-}
+    local uv_cache=${2:-}
+    local pl1=${3:-}
+    local pl2=${4:-}
+    local max_freq_khz=${5:-}
+    local gpu_min=${6:-}
+    local gpu_max=${7:-}
+
+    if [ -z "$uv_core" ] || [ -z "$uv_cache" ] || [ -z "$pl1" ] || [ -z "$pl2" ]; then
+        echo "undervolt service: explicit parameters required. Usage: undervolt service apply <core_mV> <cache_mV> <PL1_W> <PL2_W> [max_freq_kHz] [gpu_min] [gpu_max]" >&2
+        return 2
+    fi
 
     echo "=== Applying Hardware Optimizations ==="
     if has_command modprobe; then
@@ -375,14 +402,16 @@ apply_hardware_optimizations() {
         sudo_exec "$undervolt_bin" --core "$uv_core" --cache "$uv_cache" -p1 "$pl1" 28 -p2 "$pl2" 0.0024
     fi
 
-    echo "Setting CPU max frequency ceiling to ${max_freq_khz} kHz..."
-    for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do
-        if [ -w "$f" ]; then
-            printf '%s\n' "$max_freq_khz" | sudo_exec tee "$f" >/dev/null
-        fi
-    done
+    if [ -n "$max_freq_khz" ]; then
+        echo "Setting CPU max frequency ceiling to ${max_freq_khz} kHz..."
+        for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do
+            if [ -w "$f" ]; then
+                printf '%s\n' "$max_freq_khz" | sudo_exec tee "$f" >/dev/null
+            fi
+        done
+    fi
 
-    if has_command nvidia-smi; then
+    if [ -n "$gpu_min" ] && [ -n "$gpu_max" ] && has_command nvidia-smi; then
         echo "Locking GPU clocks to ${gpu_min}-${gpu_max} MHz..."
         sudo_exec nvidia-smi -lgc "${gpu_min},${gpu_max}" >/dev/null
     fi
@@ -392,20 +421,25 @@ apply_hardware_optimizations() {
 
 manage_persist_service() {
     local action=${1:-enable}
+    [ $# -gt 0 ] && shift
     local target_service="/etc/systemd/system/hardware-optimization.service"
     local local_service="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/hardware-optimization.service"
 
     case "$action" in
         unit)
-            generate_service_content "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" "${8:-}"
+            generate_service_content "$@"
             ;;
         apply)
-            apply_hardware_optimizations "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" "${8:-}"
+            apply_hardware_optimizations "$@"
             ;;
         enable)
-            echo "Configuring persistent hardware optimization service..."
+            if [ $# -lt 4 ]; then
+                echo "undervolt service: explicit parameters required to enable persistent service. Usage: undervolt service enable <core_mV> <cache_mV> <PL1_W> <PL2_W> [max_freq_kHz] [gpu_min] [gpu_max]" >&2
+                return 2
+            fi
             local content
-            content=$(generate_service_content "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" "${8:-}")
+            content=$(generate_service_content "$@") || return $?
+            echo "Configuring persistent hardware optimization service..."
             printf '%s\n' "$content" > "$local_service"
             printf '%s\n' "$content" | sudo_exec tee "$target_service" >/dev/null
 
@@ -760,7 +794,7 @@ def worker(end_time, counter):
         c += 1
     counter.value = c
 
-def test_candidate(pl1, pl2, freq_ghz, duration=1.8):
+def probe_candidate(pl1, pl2, freq_ghz, duration=1.8):
     set_profile(pl1, pl2, freq_ghz)
     time.sleep(0.25)
     cpu_count = os.cpu_count() or 4
@@ -802,7 +836,7 @@ candidates = [
 
 results = []
 for name, pl1, pl2, freq in candidates:
-    t_peak, throttles, ops_sec = test_candidate(pl1, pl2, freq, duration=1.8)
+    t_peak, throttles, ops_sec = probe_candidate(pl1, pl2, freq, duration=1.8)
     eff = ops_sec / t_peak if t_peak > 0 else 0.0
     passed = (t_peak <= target_temp and throttles == 0)
     results.append({
@@ -870,7 +904,14 @@ case "$cmd" in
     gpu-reset) reset_gpu ;;
     eval|test|benchmark) run_thermal_eval "${2:-$DEFAULT_BENCHMARK_SECONDS}" ;;
     optimize|tune|opt) run_auto_optimization "${2:-80}" ;;
-    persist|service) manage_persist_service "${2:-enable}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}" "${8:-}" ;;
+    persist|service)
+        shift
+        if [ $# -eq 0 ]; then
+            manage_persist_service enable
+        else
+            manage_persist_service "$@"
+        fi
+        ;;
     reset) reset_all ;;
     help|-h|--help) usage ;;
     *)

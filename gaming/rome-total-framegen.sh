@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # rome-total-framegen.sh — Frame Generation & Hardware Offload Launcher for Total War: ROME REMASTERED
-# Orchestrates NVIDIA RTX 3050 offload, P-core thread pinning, and Lossless Scaling companion.
+# Orchestrates GPU offload, opt-in CPU pinning, and Lossless Scaling companion.
 
 set -euo pipefail
 
@@ -8,29 +8,121 @@ STEAM_ROOT="$HOME/.local/share/Steam"
 ROME_APPID="885970"
 LS_APPID="993090"
 LS_DIR="$STEAM_ROOT/steamapps/common/Lossless Scaling"
-LS_PFX="$STEAM_ROOT/steamapps/compatdata/$LS_APPID/pfx"
 PROTON_EXP="$STEAM_ROOT/steamapps/common/Proton - Experimental"
 
+show_help() {
+    cat <<'HELP'
+Usage: rome-total-framegen.sh [options] [target_fps]
+
+Total War: ROME REMASTERED — Frame Generation & Hardware Offload Launcher
+
+Options:
+  --ls                 Enable Lossless Scaling companion (default: disabled)
+  --fps <target_fps>   Target frame rate (default: 100)
+  --pin <cores>        Opt-in CPU affinity/topology pinning (e.g. 0-7; default: native)
+  --freq <kHz>         Opt-in CPU max frequency boost (default: unchanged)
+  --dry-run            Validate settings and print execution plan without running
+  -h, --help           Show this help message and exit
+HELP
+}
+
+TARGET_FPS=100
+USE_LS=0
+CPU_PIN=""
+BOOST_FREQ=""
+DRY_RUN=0
+
+# Step 0: Validate CLI arguments before any system or hardware modification
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help|help)
+            show_help
+            exit 0
+            ;;
+        --ls)
+            USE_LS=1
+            shift
+            ;;
+        --fps)
+            [ $# -ge 2 ] || { echo "rome-total-framegen: --fps requires a numeric argument" >&2; exit 2; }
+            TARGET_FPS="$2"
+            shift 2
+            ;;
+        --pin)
+            [ $# -ge 2 ] || { echo "rome-total-framegen: --pin requires core specification (e.g. 0-7)" >&2; exit 2; }
+            CPU_PIN="$2"
+            shift 2
+            ;;
+        --freq)
+            [ $# -ge 2 ] || { echo "rome-total-framegen: --freq requires frequency in kHz" >&2; exit 2; }
+            BOOST_FREQ="$2"
+            shift 2
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        [0-9]*)
+            TARGET_FPS="$1"
+            shift
+            ;;
+        *)
+            echo "rome-total-framegen: unknown argument '$1'" >&2
+            show_help >&2
+            exit 2
+            ;;
+    esac
+done
+
+if ! [[ "$TARGET_FPS" =~ ^[0-9]+$ ]]; then
+    echo "rome-total-framegen: target FPS must be a positive integer" >&2
+    exit 2
+fi
+
+if [ -n "$CPU_PIN" ] && ! [[ "$CPU_PIN" =~ ^[0-9,-]+$ ]]; then
+    echo "rome-total-framegen: invalid CPU pin syntax '$CPU_PIN'" >&2
+    exit 2
+fi
+
+if [ -n "$BOOST_FREQ" ] && ! [[ "$BOOST_FREQ" =~ ^[0-9]+$ ]]; then
+    echo "rome-total-framegen: frequency must be an integer in kHz" >&2
+    exit 2
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    echo "rome-total-framegen: dry run execution plan"
+    echo "  Target FPS:    $TARGET_FPS"
+    echo "  Lossless FG:   $([ "$USE_LS" -eq 1 ] && echo "enabled" || echo "disabled")"
+    echo "  CPU Pinning:   ${CPU_PIN:-native}"
+    echo "  Freq Boost:    ${BOOST_FREQ:-none}"
+    exit 0
+fi
+
 echo "================================================================================"
-echo "   Total War: ROME REMASTERED — Frame Generation & Hardware Offload Launcher    "
+echo " Total War: ROME REMASTERED — Frame Generation & Hardware Offload Launcher "
 echo "================================================================================"
 
-# ── Step 1: Environment & GPU Render Offload ─────────────────────────────────
+# Step 1: Environment & GPU Render Offload
 export __NV_PRIME_RENDER_OFFLOAD=1
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
 export __VK_LAYER_NV_optimus=NVIDIA_only
 export DXVK_FILTER_DEVICE_NAME="NVIDIA"
 export VKD3D_FILTER_DEVICE_NAME="NVIDIA"
 
-# CPU Core Pinning: 4 P-Cores / 8 Threads (CPUs 0-7 @ 4.5 GHz)
-export WINE_CPU_TOPOLOGY="8:0,1,2,3,4,5,6,7"
+# ponytail: CPU core pinning and frequency elevation are opt-in to avoid breaking generic systems
+if [ -n "$CPU_PIN" ]; then
+    export WINE_CPU_TOPOLOGY="$CPU_PIN"
+fi
 
-# Elevate single-core turbo ceiling to 4.2 GHz for RTS battle simulation
-if [ -w /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq ]; then
-    for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo 4200000 > "$f"; done
-elif command -v sudo >/dev/null 2>&1; then
+if [ -n "$BOOST_FREQ" ]; then
     freq_rc=0
-    sudo bash -c 'for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo 4200000 > "$f"; done' 2>/dev/null || freq_rc=$?
+    if [ -w /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq ]; then
+        for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do
+            echo "$BOOST_FREQ" > "$f" 2>/dev/null || freq_rc=$?
+        done
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo bash -c 'for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq; do echo "$1" > "$f" 2>/dev/null || f_rc=$?; done' _ "$BOOST_FREQ" 2>/dev/null || freq_rc=$?
+    fi
 fi
 
 # Shader Caching
@@ -45,6 +137,7 @@ cleanup() {
     echo "==> Cleaning up background companion processes..."
     if [ -n "$LS_PID" ] && kill -0 "$LS_PID" 2>/dev/null; then
         echo "  Stopping Lossless Scaling companion (PID: $LS_PID)..."
+        local kill_rc=0
         kill "$LS_PID" 2>/dev/null || kill_rc=$?
     fi
 }
@@ -83,9 +176,16 @@ launch_game() {
         echo "==> Native Linux rendering active (Lossless Scaling companion skipped to prevent cross-process IOMMU DMA conflicts)."
     fi
 
-    echo "==> Launching Total War: ROME REMASTERED under P-Core affinity (0-7)..."
+    local run_cmd=()
+    if [ -n "$CPU_PIN" ] && command -v taskset >/dev/null 2>&1; then
+        run_cmd+=(taskset -c "$CPU_PIN")
+        echo "==> Launching Total War: ROME REMASTERED under CPU affinity ($CPU_PIN)..."
+    else
+        echo "==> Launching Total War: ROME REMASTERED..."
+    fi
+
     if [ -x "$game_launcher" ]; then
-        taskset -c 0-7 /usr/local/bin/prime-run mangohud "$game_launcher"
+        "${run_cmd[@]}" /usr/local/bin/prime-run mangohud "$game_launcher"
     else
         echo "    Native script not directly executable; dispatching via Steam URI..."
         DISPLAY="${DISPLAY:-:1}" steam "steam://rungameid/$ROME_APPID" >/dev/null 2>&1 &
@@ -98,6 +198,4 @@ launch_game() {
     return 0
 }
 
-USE_LS=0
-[[ "${1:-}" == "--ls" || "${2:-}" == "--ls" ]] && USE_LS=1
-launch_game "${1:-100}" "$USE_LS"
+launch_game "$TARGET_FPS" "$USE_LS"
