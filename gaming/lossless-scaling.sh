@@ -182,44 +182,55 @@ configure_settings() {
     local target_fps=${1:-100}
     local multiplier=${2:-2}
 
-    echo "==> Configuring Lossless Scaling for ${target_fps} FPS target (${multiplier}x framegen)..."
-    mkdir -p "$LS_CONFIG_DIR"
-
-    python3 -c "
-import xml.etree.ElementTree as ET
+    python3 -B - "$LS_SETTINGS" "$target_fps" "$multiplier" <<'PY'
 import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
 
-path = '$LS_SETTINGS'
-if not os.path.exists(path):
-    print('Settings.xml not found, will be created on first launch.')
-    exit(0)
+path = Path(sys.argv[1]).resolve()
+fps, multiplier = sys.argv[2:]
+if not fps.isascii() or not fps.isdecimal() or multiplier not in ("2", "3", "4"):
+    sys.exit("FPS must be a nonnegative integer; multiplier must be 2, 3 or 4.")
 
-tree = ET.parse(path)
-root = tree.getroot()
+temporary = None
+try:
+    tree = ET.parse(path)
+    profiles = tree.getroot().findall('.//Profile')
+    if not profiles:
+        sys.exit("Settings.xml contains no profiles; launch Lossless Scaling to create one.")
+    values = {
+        "FrameGeneration": "LSFG3",
+        "LSFG3Multiplier": multiplier,
+        "LSFG3Mode1": "FIXED" if int(fps) == 0 else "ADAPTIVE",
+        "LSFG3Target": str(int(fps)),
+        "DrawFps": "true",
+        "CaptureApi": "DXGI",
+    }
+    for profile in profiles:
+        for name, value in values.items():
+            element = profile.find(name)
+            if element is None:
+                element = ET.SubElement(profile, name)
+            element.text = value
 
-# Update frame generation profile parameters
-for profile in root.findall('.//Profile'):
-    fg = profile.find('FrameGeneration')
-    if fg is not None: fg.text = 'LSFG3'
-
-    mult = profile.find('LSFG3Multiplier')
-    if mult is not None: mult.text = str($multiplier)
-
-    mode = profile.find('LSFG3Mode1')
-    if mode is not None: mode.text = 'ADAPTIVE' if $target_fps > 0 else 'FIXED'
-
-    target = profile.find('LSFG3Target')
-    if target is not None: target.text = str($target_fps)
-
-    draw_fps = profile.find('DrawFps')
-    if draw_fps is not None: draw_fps.text = 'true'
-
-    capture = profile.find('CaptureApi')
-    if capture is not None: capture.text = 'DXGI'
-
-tree.write(path, encoding='utf-8', xml_declaration=True)
-print('Settings.xml configured for Adaptive Frame Generation!')
-" 2>/dev/null || py_cfg_rc=$?
+    # ponytail: atomic replacement prevents truncated XML; concurrent editors
+    # remain last-writer-wins. Add locking only if shared editing is required.
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
+        temporary = output.name
+        os.fchmod(output.fileno(), stat.S_IMODE(path.stat().st_mode))
+        tree.write(output, encoding="utf-8", xml_declaration=True)
+    os.replace(temporary, path)
+    temporary = None
+except (OSError, ET.ParseError, ValueError) as error:
+    sys.exit(f"Cannot configure Settings.xml: {error}")
+finally:
+    if temporary is not None:
+        os.unlink(temporary)
+print("Settings.xml configured.")
+PY
 }
 
 # ── Step 1c: Quick-Switch Framegen Profile (2x, 3x, 4x) ─────────────────────
@@ -248,7 +259,7 @@ switch_profile() {
     esac
 
     local fps="${2:-$default_fps}"
-    configure_settings "$fps" "$mult"
+    configure_settings "$fps" "$mult" || return "$?"
 
     if pgrep -f "LosslessScaling.exe" >/dev/null 2>&1; then
         echo "✓ Switched profile to ${mult}x Framegen (Target: ${fps} FPS)."
@@ -265,7 +276,7 @@ start_ls() {
 
     # ponytail: only re-configure Settings.xml if explicit parameters were passed or settings missing
     if [ -n "$target_fps" ] || [ -n "$mult" ] || [ ! -f "$LS_SETTINGS" ]; then
-        configure_settings "${target_fps:-100}" "${mult:-2}"
+        configure_settings "${target_fps:-100}" "${mult:-2}" || return "$?"
     fi
 
     if pgrep -f "LosslessScaling.exe" >/dev/null; then
