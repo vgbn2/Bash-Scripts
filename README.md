@@ -90,17 +90,24 @@ Low-level hardware tuning, thermal optimization, and kernel fault forensics.
 
 | Utility / Script | Use Case & What It Is For |
 | :--- | :--- |
-| **`undervolt`** | **CPU/GPU Voltage & Power Management**: Eliminates thermal throttling and increases sustained clock speeds on Intel Core (10th-12th Gen hybrid), AMD Ryzen, and NVIDIA mobile/desktop GPUs. Supports manual offsets, GPU clock/power clamping, and benchmark evaluations. |
+| **`undervolt`** | **CPU/GPU Voltage & Power Management**: Eliminates thermal throttling and increases sustained clock speeds on Intel Core (10th-12th Gen hybrid), AMD Ryzen, and NVIDIA mobile/desktop GPUs. Supports manual offsets, GPU clock/power clamping, benchmark evaluations, and parameterized, fail-closed systemd service generation (`service unit`, `service apply`, `service enable`). |
 | **`hardware-register-inspector.sh`** | **Kernel & Register Forensics**: Directly interrogates CPU MSRs (`0x150`, `0x1B0`, `0x610`), decodes PCIe Type 0 configuration headers, extracts NVML throttle bitmasks, and parses kernel dmesg for Intel VT-d DMAR faults and NVIDIA Xid crash cascades. |
-| **`cpu`** | **Frequency & Governor Tuning**: Displays per-core frequencies, toggles Intel Turbo Boost, switches governors (`performance`, `powersave`), and enforces max frequency ceilings (e.g. 4.0 GHz). |
+| **`cpu`** | **Frequency & Governor Tuning**: Dynamically discovers hardware frequency bounds (`cpuinfo_min_freq` / `cpuinfo_max_freq`), controls multi-vendor turbo boost (Intel `no_turbo` and AMD/generic `cpufreq/boost`), sets frequency ceilings across cores, and handles systems without ACPI platform profiles gracefully. |
 | **`fan`** | **Firmware Fan Profiles**: Quick switching of vendor-level ACPI/firmware cooling profiles (e.g. Lenovo Legion Quiet, Balanced, Performance). |
 | **`check_gpu.sh`** | **NVIDIA Telemetry Watcher**: Cron-friendly background monitor reporting GPU temperatures, VRAM consumption, and throttle events via desktop notifications. |
-| **`hardware-optimization.service`** | **Systemd Boot Service**: Automatically applies undervolt, frequency ceilings, and governor profiles on machine boot. |
+| **`hardware-optimization.service`** | **Systemd Boot Service**: Template unit for applying undervolt, frequency ceilings, and governor profiles on machine boot. |
 
 *Example Commands*:
 ```bash
-# Inspect current voltage offsets and power envelopes
+# Inspect current voltage offsets, dynamic bounds, and power envelopes
 undervolt status
+cpu status
+
+# Set CPU frequency within dynamically discovered bounds
+cpu 3.3
+
+# Generate custom systemd unit with explicit host tuning parameters
+undervolt service unit -45 -45 40 50 3400000 300 1700
 
 # Run 5-minute stress evaluation and monitor thermals
 undervolt eval 5
@@ -110,11 +117,6 @@ hardware-register-inspector.sh all
 hardware-register-inspector.sh msr
 hardware-register-inspector.sh gpu
 hardware-register-inspector.sh journal
-
-# CPU frequency management
-cpu status
-cpu profile performance
-cpu max 4000
 ```
 
 ---
@@ -128,21 +130,25 @@ Complete Linux gaming launcher, Proton environment validator, and Lossless Scali
 | :--- | :--- |
 | **`gaming`** | **Gaming Command Center**: Inventories Steam, non-Steam, and Flatpak games; checks Proton prefixes; and dispatches games with MangoHud and Prime GPU offload. |
 | **`gaming-doctor`** | **Graphics Stack Diagnostic**: Validates Vulkan ICDs, 32-bit GL drivers, NVIDIA Prime offload, Proton prefixes, and input lag optimizations. |
-| **`lossless-scaling.sh`** | **Standalone Lossless Scaling Companion Controller**: Manages Lossless Scaling (LSFG 3.0) under Proton with dedicated NVIDIA GPU offload. Automatically detects game windows, tunes `Settings.xml` (Adaptive 100/120/144/160 FPS, 2x/3x/4x multipliers), and triggers hotkeys (`Ctrl+Alt+S`) via `xdotool`. |
+| **`lossless-scaling.sh`** | **Standalone Lossless Scaling Companion Controller**: Manages Lossless Scaling (LSFG 3.0) under Proton with dedicated NVIDIA GPU offload. Automatically detects game windows, validates parameters, performs atomic `Settings.xml` updates (Adaptive 100/120/144/160 FPS, 2x/3x/4x multipliers), and triggers hotkeys (`Ctrl+Alt+S`) via `xdotool`. |
 | **`witcher3-framegen.sh`** | **The Witcher 3 DX12 Launcher**: Enforces borderless window mode, 60 FPS in-engine cap (guaranteeing steady pacing and 35% GPU headroom), disables VSync, enables NVIDIA Reflex, pins Alder Lake P-cores (CPUs 0-7), bypasses anti-Wine DLSS blocks (`frog_get_version`), and synchronizes LSFG 3.0 for 120 FPS target. |
-| **`rome-total-framegen.sh`** | **Total War: ROME REMASTERED Launcher**: Isolates CPU affinity to P-cores (0-7), elevates single-core turbo ceiling to 4.2 GHz for RTS battle simulation, and offloads rendering to NVIDIA RTX 3050. |
+| **`rome-total-framegen.sh`** | **Total War: ROME REMASTERED Launcher**: GPU offload launcher with opt-in thread pinning (`--pin <cores>`), opt-in CPU frequency elevation (`--freq <kHz>`), zero-side-effect help, and `--dry-run` validation. |
 
 *Example Commands*:
 ```bash
-# Witcher 3 with 120 FPS target (60 FPS base + 2x LSFG 3.0)
-gaming framegen witcher 120
-gaming framegen witcher status
+# Total War: ROME with opt-in pinning and dry-run validation
+rome-total-framegen.sh --dry-run --fps 120 --pin 0-7
+rome-total-framegen.sh --help
 
 # Standalone Lossless Scaling Controller
 lossless-scaling.sh start 100 2     # Start companion for 100 FPS target (2x)
 lossless-scaling.sh profile 3x 144  # Switch to 3x profile (144 FPS target)
 lossless-scaling.sh detect          # Detect active game process and window ID
 lossless-scaling.sh engage          # Focus game window and trigger frame generation
+
+# Witcher 3 with 120 FPS target (60 FPS base + 2x LSFG 3.0)
+gaming framegen witcher 120
+gaming framegen witcher status
 ```
 
 ---
@@ -225,8 +231,10 @@ The test suite runs entirely offline without requiring root privileges, live GPU
 # Run complete test suite
 tests/smoke.sh
 tests/safety.sh
+tests/test_hardware_generic.sh
 tests/test_hardware_register_inspector.sh
 tests/test_lossless_scaling_profiles.sh
+tests/test_lossless_settings.sh
 tests/test_security.sh
 tests/test_undervolt.sh
 tests/test_witcher_framegen.sh
